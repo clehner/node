@@ -90,7 +90,7 @@ class ScriptDataImpl : public ScriptData {
         last_entry_(0) { }
   virtual ~ScriptDataImpl();
   virtual int Length();
-  virtual unsigned* Data();
+  virtual const char* Data();
   virtual bool HasError();
   FunctionEntry GetFunctionEnd(int start);
   bool SanityCheck();
@@ -168,7 +168,8 @@ FunctionLiteral* MakeLazyAST(Handle<Script> script,
 class CompileTimeValue: public AllStatic {
  public:
   enum Type {
-    OBJECT_LITERAL,
+    OBJECT_LITERAL_FAST_ELEMENTS,
+    OBJECT_LITERAL_SLOW_ELEMENTS,
     ARRAY_LITERAL
   };
 

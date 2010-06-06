@@ -28,9 +28,9 @@
 #ifndef V8_CODEGEN_H_
 #define V8_CODEGEN_H_
 
-#include "ast.h"
 #include "code-stubs.h"
 #include "runtime.h"
+#include "type-info.h"
 
 // Include the declaration of the architecture defined class CodeGenerator.
 // The contract  to the shared code is that the the CodeGenerator is a subclass
@@ -57,7 +57,7 @@
 //   ProcessDeferred
 //   Generate
 //   ComputeLazyCompile
-//   BuildBoilerplate
+//   BuildFunctionInfo
 //   ComputeCallInitialize
 //   ComputeCallInitializeInLoop
 //   ProcessDeclarations
@@ -86,6 +86,8 @@ enum UncatchableExceptionType { OUT_OF_MEMORY, TERMINATION };
 #include "x64/codegen-x64.h"
 #elif V8_TARGET_ARCH_ARM
 #include "arm/codegen-arm.h"
+#elif V8_TARGET_ARCH_MIPS
+#include "mips/codegen-mips.h"
 #else
 #error Unsupported target architecture.
 #endif
@@ -94,6 +96,64 @@ enum UncatchableExceptionType { OUT_OF_MEMORY, TERMINATION };
 
 namespace v8 {
 namespace internal {
+
+
+#define INLINE_RUNTIME_FUNCTION_LIST(F) \
+  F(IsSmi, 1, 1)                                                             \
+  F(IsNonNegativeSmi, 1, 1)                                                  \
+  F(IsArray, 1, 1)                                                           \
+  F(IsRegExp, 1, 1)                                                          \
+  F(CallFunction, -1 /* receiver + n args + function */, 1)                  \
+  F(IsConstructCall, 0, 1)                                                   \
+  F(ArgumentsLength, 0, 1)                                                   \
+  F(Arguments, 1, 1)                                                         \
+  F(ClassOf, 1, 1)                                                           \
+  F(ValueOf, 1, 1)                                                           \
+  F(SetValueOf, 2, 1)                                                        \
+  F(StringCharCodeAt, 2, 1)                                                  \
+  F(StringCharFromCode, 1, 1)                                                \
+  F(StringCharAt, 2, 1)                                                      \
+  F(ObjectEquals, 2, 1)                                                      \
+  F(Log, 3, 1)                                                               \
+  F(RandomHeapNumber, 0, 1)                                                  \
+  F(IsObject, 1, 1)                                                          \
+  F(IsFunction, 1, 1)                                                        \
+  F(IsUndetectableObject, 1, 1)                                              \
+  F(StringAdd, 2, 1)                                                         \
+  F(SubString, 3, 1)                                                         \
+  F(StringCompare, 2, 1)                                                     \
+  F(RegExpExec, 4, 1)                                                        \
+  F(RegExpConstructResult, 3, 1)                                             \
+  F(GetFromCache, 2, 1)                                                      \
+  F(NumberToString, 1, 1)                                                    \
+  F(SwapElements, 3, 1)                                                      \
+  F(MathPow, 2, 1)                                                           \
+  F(MathSin, 1, 1)                                                           \
+  F(MathCos, 1, 1)                                                           \
+  F(MathSqrt, 1, 1)
+
+
+// Support for "structured" code comments.
+#ifdef DEBUG
+
+class Comment BASE_EMBEDDED {
+ public:
+  Comment(MacroAssembler* masm, const char* msg);
+  ~Comment();
+
+ private:
+  MacroAssembler* masm_;
+  const char* msg_;
+};
+
+#else
+
+class Comment BASE_EMBEDDED {
+ public:
+  Comment(MacroAssembler*, const char*)  {}
+};
+
+#endif  // DEBUG
 
 
 // Code generation can be nested.  Code generation scopes form a stack
@@ -117,6 +177,111 @@ class CodeGeneratorScope BASE_EMBEDDED {
  private:
   static CodeGenerator* top_;
   CodeGenerator* previous_;
+};
+
+
+#if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64
+
+// State of used registers in a virtual frame.
+class FrameRegisterState {
+ public:
+  // Captures the current state of the given frame.
+  explicit FrameRegisterState(VirtualFrame* frame);
+
+  // Saves the state in the stack.
+  void Save(MacroAssembler* masm) const;
+
+  // Restores the state from the stack.
+  void Restore(MacroAssembler* masm) const;
+
+ private:
+  // Constants indicating special actions.  They should not be multiples
+  // of kPointerSize so they will not collide with valid offsets from
+  // the frame pointer.
+  static const int kIgnore = -1;
+  static const int kPush = 1;
+
+  // This flag is ored with a valid offset from the frame pointer, so
+  // it should fit in the low zero bits of a valid offset.
+  static const int kSyncedFlag = 2;
+
+  int registers_[RegisterAllocator::kNumRegisters];
+};
+
+#elif V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_MIPS
+
+
+class FrameRegisterState {
+ public:
+  inline FrameRegisterState(VirtualFrame frame) : frame_(frame) { }
+
+  inline const VirtualFrame* frame() const { return &frame_; }
+
+ private:
+  VirtualFrame frame_;
+};
+
+#else
+
+#error Unsupported target architecture.
+
+#endif
+
+
+// Helper interface to prepare to/restore after making runtime calls.
+class RuntimeCallHelper {
+ public:
+  virtual ~RuntimeCallHelper() {}
+
+  virtual void BeforeCall(MacroAssembler* masm) const = 0;
+
+  virtual void AfterCall(MacroAssembler* masm) const = 0;
+
+ protected:
+  RuntimeCallHelper() {}
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(RuntimeCallHelper);
+};
+
+
+// RuntimeCallHelper implementation that saves/restores state of a
+// virtual frame.
+class VirtualFrameRuntimeCallHelper : public RuntimeCallHelper {
+ public:
+  // Does not take ownership of |frame_state|.
+  explicit VirtualFrameRuntimeCallHelper(const FrameRegisterState* frame_state)
+      : frame_state_(frame_state) {}
+
+  virtual void BeforeCall(MacroAssembler* masm) const;
+
+  virtual void AfterCall(MacroAssembler* masm) const;
+
+ private:
+  const FrameRegisterState* frame_state_;
+};
+
+
+// RuntimeCallHelper implementation used in IC stubs: enters/leaves a
+// newly created internal frame before/after the runtime call.
+class ICRuntimeCallHelper : public RuntimeCallHelper {
+ public:
+  ICRuntimeCallHelper() {}
+
+  virtual void BeforeCall(MacroAssembler* masm) const;
+
+  virtual void AfterCall(MacroAssembler* masm) const;
+};
+
+
+// Trivial RuntimeCallHelper implementation.
+class NopRuntimeCallHelper : public RuntimeCallHelper {
+ public:
+  NopRuntimeCallHelper() {}
+
+  virtual void BeforeCall(MacroAssembler* masm) const {}
+
+  virtual void AfterCall(MacroAssembler* masm) const {}
 };
 
 
@@ -150,6 +315,8 @@ class DeferredCode: public ZoneObject {
   inline void Branch(Condition cc);
   void BindExit() { masm_->bind(&exit_label_); }
 
+  const FrameRegisterState* frame_state() const { return &frame_state_; }
+
   void SaveRegisters();
   void RestoreRegisters();
 
@@ -157,23 +324,13 @@ class DeferredCode: public ZoneObject {
   MacroAssembler* masm_;
 
  private:
-  // Constants indicating special actions.  They should not be multiples
-  // of kPointerSize so they will not collide with valid offsets from
-  // the frame pointer.
-  static const int kIgnore = -1;
-  static const int kPush = 1;
-
-  // This flag is ored with a valid offset from the frame pointer, so
-  // it should fit in the low zero bits of a valid offset.
-  static const int kSyncedFlag = 2;
-
   int statement_position_;
   int position_;
 
   Label entry_label_;
   Label exit_label_;
 
-  int registers_[RegisterAllocator::kNumRegisters];
+  FrameRegisterState frame_state_;
 
 #ifdef DEBUG
   const char* comment_;
@@ -290,8 +447,13 @@ class CompareStub: public CodeStub {
  public:
   CompareStub(Condition cc,
               bool strict,
-              NaNInformation nan_info = kBothCouldBeNaN) :
-      cc_(cc), strict_(strict), never_nan_nan_(nan_info == kCantBothBeNaN) { }
+              NaNInformation nan_info = kBothCouldBeNaN,
+              bool include_number_compare = true) :
+      cc_(cc),
+      strict_(strict),
+      never_nan_nan_(nan_info == kCantBothBeNaN),
+      include_number_compare_(include_number_compare),
+      name_(NULL) { }
 
   void Generate(MacroAssembler* masm);
 
@@ -304,6 +466,16 @@ class CompareStub: public CodeStub {
   // generating the minor key for other comparisons to avoid creating more
   // stubs.
   bool never_nan_nan_;
+  // Do generate the number comparison code in the stub. Stubs without number
+  // comparison code is used when the number comparison has been inlined, and
+  // the stub will be called if one of the operands is not a number.
+  bool include_number_compare_;
+
+  // Encoding of the minor key CCCCCCCCCCCCCCNS.
+  class StrictField: public BitField<bool, 0, 1> {};
+  class NeverNanNanField: public BitField<bool, 1, 1> {};
+  class IncludeNumberCompareField: public BitField<bool, 2, 1> {};
+  class ConditionField: public BitField<int, 3, 13> {};
 
   Major MajorKey() { return Compare; }
 
@@ -317,12 +489,16 @@ class CompareStub: public CodeStub {
 
   // Unfortunately you have to run without snapshots to see most of these
   // names in the profile since most compare stubs end up in the snapshot.
+  char* name_;
   const char* GetName();
 #ifdef DEBUG
   void Print() {
-    PrintF("CompareStub (cc %d), (strict %s)\n",
+    PrintF("CompareStub (cc %d), (strict %s), "
+           "(never_nan_nan %s), (number_compare %s)\n",
            static_cast<int>(cc_),
-           strict_ ? "true" : "false");
+           strict_ ? "true" : "false",
+           never_nan_nan_ ? "true" : "false",
+           include_number_compare_ ? "included" : "not included");
   }
 #endif
 };
@@ -342,7 +518,8 @@ class CEntryStub : public CodeStub {
                     Label* throw_termination_exception,
                     Label* throw_out_of_memory_exception,
                     bool do_gc,
-                    bool always_allocate_scope);
+                    bool always_allocate_scope,
+                    int alignment_skew = 0);
   void GenerateThrowTOS(MacroAssembler* masm);
   void GenerateThrowUncatchable(MacroAssembler* masm,
                                 UncatchableExceptionType type);
@@ -375,7 +552,7 @@ class ApiGetterEntryStub : public CodeStub {
   virtual bool GetCustomCache(Code** code_out);
   virtual void SetCustomCache(Code* value);
 
-  static const int kStackSpace = 6;
+  static const int kStackSpace = 5;
   static const int kArgc = 4;
  private:
   Handle<AccessorInfo> info() { return info_; }
@@ -387,21 +564,6 @@ class ApiGetterEntryStub : public CodeStub {
   Handle<AccessorInfo> info_;
   // The function to be called.
   ApiFunction* fun_;
-};
-
-
-// Mark the debugger statement to be recognized by debugger (by the MajorKey)
-class DebuggerStatementStub : public CodeStub {
- public:
-  DebuggerStatementStub() { }
-
-  void Generate(MacroAssembler* masm);
-
- private:
-  Major MajorKey() { return DebuggerStatement; }
-  int MinorKey() { return 0; }
-
-  const char* GetName() { return "DebuggerStatementStub"; }
 };
 
 
@@ -438,7 +600,6 @@ class JSConstructEntryStub : public JSEntryStub {
 class ArgumentsAccessStub: public CodeStub {
  public:
   enum Type {
-    READ_LENGTH,
     READ_ELEMENT,
     NEW_OBJECT
   };
@@ -452,7 +613,6 @@ class ArgumentsAccessStub: public CodeStub {
   int MinorKey() { return type_; }
 
   void Generate(MacroAssembler* masm);
-  void GenerateReadLength(MacroAssembler* masm);
   void GenerateReadElement(MacroAssembler* masm);
   void GenerateNewObject(MacroAssembler* masm);
 
@@ -507,14 +667,14 @@ class CallFunctionStub: public CodeStub {
   }
 #endif
 
-  // Minor key encoding in 31 bits AAAAAAAAAAAAAAAAAAAAAFI A(rgs)F(lag)I(nloop).
+  // Minor key encoding in 32 bits with Bitfield <Type, shift, size>.
   class InLoopBits: public BitField<InLoopFlag, 0, 1> {};
   class FlagBits: public BitField<CallFunctionFlags, 1, 1> {};
-  class ArgcBits: public BitField<int, 2, 29> {};
+  class ArgcBits: public BitField<int, 2, 32 - 2> {};
 
   Major MajorKey() { return CallFunction; }
   int MinorKey() {
-    // Encode the parameters in a unique 31 bit value.
+    // Encode the parameters in a unique 32 bit value.
     return InLoopBits::encode(in_loop_)
            | FlagBits::encode(flags_)
            | ArgcBits::encode(argc_);
@@ -541,6 +701,163 @@ class ToBooleanStub: public CodeStub {
  private:
   Major MajorKey() { return ToBoolean; }
   int MinorKey() { return 0; }
+};
+
+
+enum StringIndexFlags {
+  // Accepts smis or heap numbers.
+  STRING_INDEX_IS_NUMBER,
+
+  // Accepts smis or heap numbers that are valid array indices
+  // (ECMA-262 15.4). Invalid indices are reported as being out of
+  // range.
+  STRING_INDEX_IS_ARRAY_INDEX
+};
+
+
+// Generates code implementing String.prototype.charCodeAt.
+//
+// Only supports the case when the receiver is a string and the index
+// is a number (smi or heap number) that is a valid index into the
+// string. Additional index constraints are specified by the
+// flags. Otherwise, bails out to the provided labels.
+//
+// Register usage: |object| may be changed to another string in a way
+// that doesn't affect charCodeAt/charAt semantics, |index| is
+// preserved, |scratch| and |result| are clobbered.
+class StringCharCodeAtGenerator {
+ public:
+  StringCharCodeAtGenerator(Register object,
+                            Register index,
+                            Register scratch,
+                            Register result,
+                            Label* receiver_not_string,
+                            Label* index_not_number,
+                            Label* index_out_of_range,
+                            StringIndexFlags index_flags)
+      : object_(object),
+        index_(index),
+        scratch_(scratch),
+        result_(result),
+        receiver_not_string_(receiver_not_string),
+        index_not_number_(index_not_number),
+        index_out_of_range_(index_out_of_range),
+        index_flags_(index_flags) {
+    ASSERT(!scratch_.is(object_));
+    ASSERT(!scratch_.is(index_));
+    ASSERT(!scratch_.is(result_));
+    ASSERT(!result_.is(object_));
+    ASSERT(!result_.is(index_));
+  }
+
+  // Generates the fast case code. On the fallthrough path |result|
+  // register contains the result.
+  void GenerateFast(MacroAssembler* masm);
+
+  // Generates the slow case code. Must not be naturally
+  // reachable. Expected to be put after a ret instruction (e.g., in
+  // deferred code). Always jumps back to the fast case.
+  void GenerateSlow(MacroAssembler* masm,
+                    const RuntimeCallHelper& call_helper);
+
+ private:
+  Register object_;
+  Register index_;
+  Register scratch_;
+  Register result_;
+
+  Label* receiver_not_string_;
+  Label* index_not_number_;
+  Label* index_out_of_range_;
+
+  StringIndexFlags index_flags_;
+
+  Label call_runtime_;
+  Label index_not_smi_;
+  Label got_smi_index_;
+  Label exit_;
+
+  DISALLOW_COPY_AND_ASSIGN(StringCharCodeAtGenerator);
+};
+
+
+// Generates code for creating a one-char string from a char code.
+class StringCharFromCodeGenerator {
+ public:
+  StringCharFromCodeGenerator(Register code,
+                              Register result)
+      : code_(code),
+        result_(result) {
+    ASSERT(!code_.is(result_));
+  }
+
+  // Generates the fast case code. On the fallthrough path |result|
+  // register contains the result.
+  void GenerateFast(MacroAssembler* masm);
+
+  // Generates the slow case code. Must not be naturally
+  // reachable. Expected to be put after a ret instruction (e.g., in
+  // deferred code). Always jumps back to the fast case.
+  void GenerateSlow(MacroAssembler* masm,
+                    const RuntimeCallHelper& call_helper);
+
+ private:
+  Register code_;
+  Register result_;
+
+  Label slow_case_;
+  Label exit_;
+
+  DISALLOW_COPY_AND_ASSIGN(StringCharFromCodeGenerator);
+};
+
+
+// Generates code implementing String.prototype.charAt.
+//
+// Only supports the case when the receiver is a string and the index
+// is a number (smi or heap number) that is a valid index into the
+// string. Additional index constraints are specified by the
+// flags. Otherwise, bails out to the provided labels.
+//
+// Register usage: |object| may be changed to another string in a way
+// that doesn't affect charCodeAt/charAt semantics, |index| is
+// preserved, |scratch1|, |scratch2|, and |result| are clobbered.
+class StringCharAtGenerator {
+ public:
+  StringCharAtGenerator(Register object,
+                        Register index,
+                        Register scratch1,
+                        Register scratch2,
+                        Register result,
+                        Label* receiver_not_string,
+                        Label* index_not_number,
+                        Label* index_out_of_range,
+                        StringIndexFlags index_flags)
+      : char_code_at_generator_(object,
+                                index,
+                                scratch1,
+                                scratch2,
+                                receiver_not_string,
+                                index_not_number,
+                                index_out_of_range,
+                                index_flags),
+        char_from_code_generator_(scratch2, result) {}
+
+  // Generates the fast case code. On the fallthrough path |result|
+  // register contains the result.
+  void GenerateFast(MacroAssembler* masm);
+
+  // Generates the slow case code. Must not be naturally
+  // reachable. Expected to be put after a ret instruction (e.g., in
+  // deferred code). Always jumps back to the fast case.
+  void GenerateSlow(MacroAssembler* masm,
+                    const RuntimeCallHelper& call_helper);
+
+ private:
+  StringCharCodeAtGenerator char_code_at_generator_;
+  StringCharFromCodeGenerator char_from_code_generator_;
+
+  DISALLOW_COPY_AND_ASSIGN(StringCharAtGenerator);
 };
 
 

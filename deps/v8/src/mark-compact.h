@@ -37,7 +37,12 @@ namespace internal {
 typedef bool (*IsAliveFunction)(HeapObject* obj, int* size, int* offset);
 
 // Callback function for non-live blocks in the old generation.
-typedef void (*DeallocateFunction)(Address start, int size_in_bytes);
+// If add_to_freelist is false then just accounting stats are updated and
+// no attempt to add area to free list is made.
+typedef void (*DeallocateFunction)(Address start,
+                                   int size_in_bytes,
+                                   bool add_to_freelist,
+                                   bool last_on_page);
 
 
 // Forward declarations.
@@ -127,8 +132,7 @@ class MarkCompactCollector: public AllStatic {
     SWEEP_SPACES,
     ENCODE_FORWARDING_ADDRESSES,
     UPDATE_POINTERS,
-    RELOCATE_OBJECTS,
-    REBUILD_RSETS
+    RELOCATE_OBJECTS
   };
 
   // The current stage of the collector.
@@ -265,22 +269,22 @@ class MarkCompactCollector: public AllStatic {
   //          written to their map word's offset in the inactive
   //          semispace.
   //
-  //          Bookkeeping data is written to the remembered-set are of
+  //          Bookkeeping data is written to the page header of
   //          eached paged-space page that contains live objects after
   //          compaction:
   //
-  //          The 3rd word of the page (first word of the remembered
-  //          set) contains the relocation top address, the address of
-  //          the first word after the end of the last live object in
-  //          the page after compaction.
+  //          The allocation watermark field is used to track the
+  //          relocation top address, the address of the first word
+  //          after the end of the last live object in the page after
+  //          compaction.
   //
-  //          The 4th word contains the zero-based index of the page in
-  //          its space.  This word is only used for map space pages, in
+  //          The Page::mc_page_index field contains the zero-based index of the
+  //          page in its space.  This word is only used for map space pages, in
   //          order to encode the map addresses in 21 bits to free 11
   //          bits per map word for the forwarding address.
   //
-  //          The 5th word contains the (nonencoded) forwarding address
-  //          of the first live object in the page.
+  //          The Page::mc_first_forwarded field contains the (nonencoded)
+  //          forwarding address of the first live object in the page.
   //
   //          In both the new space and the paged spaces, a linked list
   //          of live regions is constructructed (linked through
@@ -313,11 +317,30 @@ class MarkCompactCollector: public AllStatic {
 
   // Callback functions for deallocating non-live blocks in the old
   // generation.
-  static void DeallocateOldPointerBlock(Address start, int size_in_bytes);
-  static void DeallocateOldDataBlock(Address start, int size_in_bytes);
-  static void DeallocateCodeBlock(Address start, int size_in_bytes);
-  static void DeallocateMapBlock(Address start, int size_in_bytes);
-  static void DeallocateCellBlock(Address start, int size_in_bytes);
+  static void DeallocateOldPointerBlock(Address start,
+                                        int size_in_bytes,
+                                        bool add_to_freelist,
+                                        bool last_on_page);
+
+  static void DeallocateOldDataBlock(Address start,
+                                     int size_in_bytes,
+                                     bool add_to_freelist,
+                                     bool last_on_page);
+
+  static void DeallocateCodeBlock(Address start,
+                                  int size_in_bytes,
+                                  bool add_to_freelist,
+                                  bool last_on_page);
+
+  static void DeallocateMapBlock(Address start,
+                                 int size_in_bytes,
+                                 bool add_to_freelist,
+                                 bool last_on_page);
+
+  static void DeallocateCellBlock(Address start,
+                                  int size_in_bytes,
+                                  bool add_to_freelist,
+                                  bool last_on_page);
 
   // If we are not compacting the heap, we simply sweep the spaces except
   // for the large object space, clearing mark bits and adding unmarked
@@ -331,9 +354,7 @@ class MarkCompactCollector: public AllStatic {
   //
   //   After: All pointers in live objects, including encoded map
   //          pointers, are updated to point to their target's new
-  //          location.  The remembered set area of each paged-space
-  //          page containing live objects still contains bookkeeping
-  //          information.
+  //          location.
 
   friend class UpdatingVisitor;  // helper for updating visited objects
 
@@ -355,13 +376,9 @@ class MarkCompactCollector: public AllStatic {
   // Phase 4: Relocating objects.
   //
   //  Before: Pointers to live objects are updated to point to their
-  //          target's new location.  The remembered set area of each
-  //          paged-space page containing live objects still contains
-  //          bookkeeping information.
+  //          target's new location.
   //
-  //   After: Objects have been moved to their new addresses. The
-  //          remembered set area of each paged-space page containing
-  //          live objects still contains bookkeeping information.
+  //   After: Objects have been moved to their new addresses.
 
   // Relocates objects in all spaces.
   static void RelocateObjects();
@@ -390,43 +407,32 @@ class MarkCompactCollector: public AllStatic {
   // Copy a new object.
   static int RelocateNewObject(HeapObject* obj);
 
-  // -----------------------------------------------------------------------
-  // Phase 5: Rebuilding remembered sets.
-  //
-  //  Before: The heap is in a normal state except that remembered sets
-  //          in the paged spaces are not correct.
-  //
-  //   After: The heap is in a normal state.
-
-  // Rebuild remembered set in old and map spaces.
-  static void RebuildRSets();
-
 #ifdef DEBUG
   // -----------------------------------------------------------------------
   // Debugging variables, functions and classes
   // Counters used for debugging the marking phase of mark-compact or
   // mark-sweep collection.
 
-  // Number of live objects in Heap::to_space_.
-  static int live_young_objects_;
+  // Size of live objects in Heap::to_space_.
+  static int live_young_objects_size_;
 
-  // Number of live objects in Heap::old_pointer_space_.
-  static int live_old_pointer_objects_;
+  // Size of live objects in Heap::old_pointer_space_.
+  static int live_old_pointer_objects_size_;
 
-  // Number of live objects in Heap::old_data_space_.
-  static int live_old_data_objects_;
+  // Size of live objects in Heap::old_data_space_.
+  static int live_old_data_objects_size_;
 
-  // Number of live objects in Heap::code_space_.
-  static int live_code_objects_;
+  // Size of live objects in Heap::code_space_.
+  static int live_code_objects_size_;
 
-  // Number of live objects in Heap::map_space_.
-  static int live_map_objects_;
+  // Size of live objects in Heap::map_space_.
+  static int live_map_objects_size_;
 
-  // Number of live objects in Heap::cell_space_.
-  static int live_cell_objects_;
+  // Size of live objects in Heap::cell_space_.
+  static int live_cell_objects_size_;
 
-  // Number of live objects in Heap::lo_space_.
-  static int live_lo_objects_;
+  // Size of live objects in Heap::lo_space_.
+  static int live_lo_objects_size_;
 
   // Number of live bytes in this collection.
   static int live_bytes_;

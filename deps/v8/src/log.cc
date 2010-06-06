@@ -143,15 +143,14 @@ bool Profiler::paused_ = false;
 // StackTracer implementation
 //
 void StackTracer::Trace(TickSample* sample) {
-  if (sample->state == GC) {
-    sample->frames_count = 0;
-    return;
-  }
+  sample->function = NULL;
+  sample->frames_count = 0;
+
+  if (sample->state == GC) return;
 
   const Address js_entry_sp = Top::js_entry_sp(Top::GetCurrentThread());
   if (js_entry_sp == 0) {
     // Not executing JS now.
-    sample->frames_count = 0;
     return;
   }
 
@@ -163,8 +162,7 @@ void StackTracer::Trace(TickSample* sample) {
   }
 
   int i = 0;
-  const Address callback = Logger::current_state_ != NULL ?
-      Logger::current_state_->external_callback() : NULL;
+  const Address callback = VMState::external_callback();
   if (callback != NULL) {
     sample->stack[i++] = callback;
   }
@@ -172,7 +170,7 @@ void StackTracer::Trace(TickSample* sample) {
   SafeStackTraceFrameIterator it(sample->fp, sample->sp,
                                  sample->sp, js_entry_sp);
   while (!it.done() && i < TickSample::kMaxFramesCount) {
-    sample->stack[i++] = it.frame()->pc();
+    sample->stack[i++] = reinterpret_cast<Address>(it.frame()->function());
     it.Advance();
   }
   sample->frames_count = i;
@@ -324,12 +322,12 @@ void Profiler::Run() {
 //
 Ticker* Logger::ticker_ = NULL;
 Profiler* Logger::profiler_ = NULL;
-VMState* Logger::current_state_ = NULL;
-VMState Logger::bottom_state_(EXTERNAL);
 SlidingStateWindow* Logger::sliding_state_window_ = NULL;
 const char** Logger::log_events_ = NULL;
 CompressionHelper* Logger::compression_helper_ = NULL;
-bool Logger::is_logging_ = false;
+int Logger::logging_nesting_ = 0;
+int Logger::cpu_profiler_nesting_ = 0;
+int Logger::heap_profiler_nesting_ = 0;
 
 #define DECLARE_LONG_EVENT(ignore1, long_name, ignore2) long_name,
 const char* kLongLogEventsNames[Logger::NUMBER_OF_LOG_EVENTS] = {
@@ -368,15 +366,6 @@ void Logger::LogAliases() {
 #endif  // ENABLE_LOGGING_AND_PROFILING
 
 
-void Logger::Preamble(const char* content) {
-#ifdef ENABLE_LOGGING_AND_PROFILING
-  if (!Log::IsEnabled() || !FLAG_log_code) return;
-  LogMessageBuilder msg;
-  msg.WriteCStringToLogFile(content);
-#endif
-}
-
-
 void Logger::StringEvent(const char* name, const char* value) {
 #ifdef ENABLE_LOGGING_AND_PROFILING
   if (FLAG_log) UncheckedStringEvent(name, value);
@@ -396,12 +385,19 @@ void Logger::UncheckedStringEvent(const char* name, const char* value) {
 
 void Logger::IntEvent(const char* name, int value) {
 #ifdef ENABLE_LOGGING_AND_PROFILING
-  if (!Log::IsEnabled() || !FLAG_log) return;
+  if (FLAG_log) UncheckedIntEvent(name, value);
+#endif
+}
+
+
+#ifdef ENABLE_LOGGING_AND_PROFILING
+void Logger::UncheckedIntEvent(const char* name, int value) {
+  if (!Log::IsEnabled()) return;
   LogMessageBuilder msg;
   msg.Append("%s,%d\n", name, value);
   msg.WriteToLogFile();
-#endif
 }
+#endif
 
 
 void Logger::HandleEvent(const char* name, Object** location) {
@@ -1164,53 +1160,60 @@ int Logger::GetActiveProfilerModules() {
 }
 
 
-void Logger::PauseProfiler(int flags) {
+void Logger::PauseProfiler(int flags, int tag) {
   if (!Log::IsEnabled()) return;
-  const int active_modules = GetActiveProfilerModules();
-  const int modules_to_disable = active_modules & flags;
-  if (modules_to_disable == PROFILER_MODULE_NONE) return;
-
-  if (modules_to_disable & PROFILER_MODULE_CPU) {
-    profiler_->pause();
-    if (FLAG_prof_lazy) {
-      if (!FLAG_sliding_state_window) ticker_->Stop();
-      FLAG_log_code = false;
-      // Must be the same message as Log::kDynamicBufferSeal.
-      LOG(UncheckedStringEvent("profiler", "pause"));
+  if (flags & PROFILER_MODULE_CPU) {
+    // It is OK to have negative nesting.
+    if (--cpu_profiler_nesting_ == 0) {
+      profiler_->pause();
+      if (FLAG_prof_lazy) {
+        if (!FLAG_sliding_state_window) ticker_->Stop();
+        FLAG_log_code = false;
+        // Must be the same message as Log::kDynamicBufferSeal.
+        LOG(UncheckedStringEvent("profiler", "pause"));
+      }
+      --logging_nesting_;
     }
   }
-  if (modules_to_disable &
+  if (flags &
       (PROFILER_MODULE_HEAP_STATS | PROFILER_MODULE_JS_CONSTRUCTORS)) {
-    FLAG_log_gc = false;
+    if (--heap_profiler_nesting_ == 0) {
+      FLAG_log_gc = false;
+      --logging_nesting_;
+    }
   }
-  // Turn off logging if no active modules remain.
-  if ((active_modules & ~flags) == PROFILER_MODULE_NONE) {
-    is_logging_ = false;
+  if (tag != 0) {
+    UncheckedIntEvent("close-tag", tag);
   }
 }
 
 
-void Logger::ResumeProfiler(int flags) {
+void Logger::ResumeProfiler(int flags, int tag) {
   if (!Log::IsEnabled()) return;
-  const int modules_to_enable = ~GetActiveProfilerModules() & flags;
-  if (modules_to_enable != PROFILER_MODULE_NONE) {
-    is_logging_ = true;
+  if (tag != 0) {
+    UncheckedIntEvent("open-tag", tag);
   }
-  if (modules_to_enable & PROFILER_MODULE_CPU) {
-    if (FLAG_prof_lazy) {
-      profiler_->Engage();
-      LOG(UncheckedStringEvent("profiler", "resume"));
-      FLAG_log_code = true;
-      LogCompiledFunctions();
-      LogFunctionObjects();
-      LogAccessorCallbacks();
-      if (!FLAG_sliding_state_window) ticker_->Start();
+  if (flags & PROFILER_MODULE_CPU) {
+    if (cpu_profiler_nesting_++ == 0) {
+      ++logging_nesting_;
+      if (FLAG_prof_lazy) {
+        profiler_->Engage();
+        LOG(UncheckedStringEvent("profiler", "resume"));
+        FLAG_log_code = true;
+        LogCompiledFunctions();
+        LogFunctionObjects();
+        LogAccessorCallbacks();
+        if (!FLAG_sliding_state_window) ticker_->Start();
+      }
+      profiler_->resume();
     }
-    profiler_->resume();
   }
-  if (modules_to_enable &
+  if (flags &
       (PROFILER_MODULE_HEAP_STATS | PROFILER_MODULE_JS_CONSTRUCTORS)) {
-    FLAG_log_gc = true;
+    if (heap_profiler_nesting_++ == 0) {
+      ++logging_nesting_;
+      FLAG_log_gc = true;
+    }
   }
 }
 
@@ -1219,7 +1222,7 @@ void Logger::ResumeProfiler(int flags) {
 // either from main or Profiler's thread.
 void Logger::StopLoggingAndProfiling() {
   Log::stop();
-  PauseProfiler(PROFILER_MODULE_CPU);
+  PauseProfiler(PROFILER_MODULE_CPU, 0);
 }
 
 
@@ -1260,8 +1263,12 @@ void Logger::LogCodeObject(Object* object) {
     switch (code_object->kind()) {
       case Code::FUNCTION:
         return;  // We log this later using LogCompiledFunctions.
+      case Code::BINARY_OP_IC:
+        // fall through
       case Code::STUB:
-        description = CodeStub::MajorName(code_object->major_key());
+        description = CodeStub::MajorName(code_object->major_key(), true);
+        if (description == NULL)
+          description = "A stub from the snapshot";
         tag = Logger::STUB_TAG;
         break;
       case Code::BUILTIN:
@@ -1289,7 +1296,16 @@ void Logger::LogCodeObject(Object* object) {
         tag = Logger::CALL_IC_TAG;
         break;
     }
-    LOG(CodeCreateEvent(tag, code_object, description));
+    PROFILE(CodeCreateEvent(tag, code_object, description));
+  }
+}
+
+
+void Logger::LogCodeObjects() {
+  AssertNoAllocation no_alloc;
+  HeapIterator iterator;
+  for (HeapObject* obj = iterator.next(); obj != NULL; obj = iterator.next()) {
+    if (obj->IsCode()) LogCodeObject(obj);
   }
 }
 
@@ -1297,9 +1313,8 @@ void Logger::LogCodeObject(Object* object) {
 void Logger::LogCompiledFunctions() {
   HandleScope scope;
   const int compiled_funcs_count = EnumerateCompiledFunctions(NULL);
-  Handle<SharedFunctionInfo>* sfis =
-      NewArray< Handle<SharedFunctionInfo> >(compiled_funcs_count);
-  EnumerateCompiledFunctions(sfis);
+  ScopedVector< Handle<SharedFunctionInfo> > sfis(compiled_funcs_count);
+  EnumerateCompiledFunctions(sfis.start());
 
   // During iteration, there can be heap allocation due to
   // GetScriptLineNumber call.
@@ -1314,36 +1329,36 @@ void Logger::LogCompiledFunctions() {
         Handle<String> script_name(String::cast(script->name()));
         int line_num = GetScriptLineNumber(script, shared->start_position());
         if (line_num > 0) {
-          LOG(CodeCreateEvent(Logger::LAZY_COMPILE_TAG,
-                              shared->code(), *func_name,
-                              *script_name, line_num + 1));
+          PROFILE(CodeCreateEvent(
+              Logger::ToNativeByScript(Logger::LAZY_COMPILE_TAG, *script),
+              shared->code(), *func_name,
+              *script_name, line_num + 1));
         } else {
-          // Can't distinguish enum and script here, so always use Script.
-          LOG(CodeCreateEvent(Logger::SCRIPT_TAG,
-                              shared->code(), *script_name));
+          // Can't distinguish eval and script here, so always use Script.
+          PROFILE(CodeCreateEvent(
+              Logger::ToNativeByScript(Logger::SCRIPT_TAG, *script),
+              shared->code(), *script_name));
         }
       } else {
-        LOG(CodeCreateEvent(
-            Logger::LAZY_COMPILE_TAG, shared->code(), *func_name));
+        PROFILE(CodeCreateEvent(
+            Logger::ToNativeByScript(Logger::LAZY_COMPILE_TAG, *script),
+            shared->code(), *func_name));
       }
-    } else if (shared->function_data()->IsFunctionTemplateInfo()) {
+    } else if (shared->IsApiFunction()) {
       // API function.
-      FunctionTemplateInfo* fun_data =
-          FunctionTemplateInfo::cast(shared->function_data());
+      FunctionTemplateInfo* fun_data = shared->get_api_func_data();
       Object* raw_call_data = fun_data->call_code();
       if (!raw_call_data->IsUndefined()) {
         CallHandlerInfo* call_data = CallHandlerInfo::cast(raw_call_data);
         Object* callback_obj = call_data->callback();
         Address entry_point = v8::ToCData<Address>(callback_obj);
-        LOG(CallbackEvent(*func_name, entry_point));
+        PROFILE(CallbackEvent(*func_name, entry_point));
       }
     } else {
-      LOG(CodeCreateEvent(
+      PROFILE(CodeCreateEvent(
           Logger::LAZY_COMPILE_TAG, shared->code(), *func_name));
     }
   }
-
-  DeleteArray(sfis);
 }
 
 
@@ -1354,7 +1369,7 @@ void Logger::LogFunctionObjects() {
     if (!obj->IsJSFunction()) continue;
     JSFunction* jsf = JSFunction::cast(obj);
     if (!jsf->is_compiled()) continue;
-    LOG(FunctionCreateEvent(jsf));
+    PROFILE(FunctionCreateEvent(jsf));
   }
 }
 
@@ -1369,11 +1384,11 @@ void Logger::LogAccessorCallbacks() {
     String* name = String::cast(ai->name());
     Address getter_entry = v8::ToCData<Address>(ai->getter());
     if (getter_entry != 0) {
-      LOG(GetterCallbackEvent(name, getter_entry));
+      PROFILE(GetterCallbackEvent(name, getter_entry));
     }
     Address setter_entry = v8::ToCData<Address>(ai->setter());
     if (setter_entry != 0) {
-      LOG(SetterCallbackEvent(name, setter_entry));
+      PROFILE(SetterCallbackEvent(name, setter_entry));
     }
   }
 }
@@ -1456,7 +1471,7 @@ bool Logger::Setup() {
     }
   }
 
-  current_state_ = &bottom_state_;
+  ASSERT(VMState::is_outermost_external());
 
   ticker_ = new Ticker(kSamplingIntervalMs);
 
@@ -1470,14 +1485,16 @@ bool Logger::Setup() {
     compression_helper_ = new CompressionHelper(kCompressionWindowSize);
   }
 
-  is_logging_ = start_logging;
+  if (start_logging) {
+    logging_nesting_ = 1;
+  }
 
   if (FLAG_prof) {
     profiler_ = new Profiler();
     if (!FLAG_prof_auto) {
       profiler_->pause();
     } else {
-      is_logging_ = true;
+      logging_nesting_ = 1;
     }
     if (!FLAG_prof_lazy) {
       profiler_->Engage();
@@ -1536,6 +1553,5 @@ void Logger::EnableSlidingStateWindow() {
   }
 #endif
 }
-
 
 } }  // namespace v8::internal

@@ -436,6 +436,12 @@ void CheckDebuggerUnloaded(bool check_functions) {
 }
 
 
+void ForceUnloadDebugger() {
+  Debugger::never_unload_debugger_ = false;
+  Debugger::UnloadDebugger();
+}
+
+
 } }  // namespace v8::internal
 
 
@@ -550,6 +556,15 @@ const char* frame_script_data_source =
 v8::Local<v8::Function> frame_script_data;
 
 
+// Source for The JavaScript function which picks out the script data from
+// AfterCompile event
+const char* compiled_script_data_source =
+    "function compiled_script_data(event_data) {"
+    "  return event_data.script().data();"
+    "}";
+v8::Local<v8::Function> compiled_script_data;
+
+
 // Source for The JavaScript function which returns the number of frames.
 static const char* frame_count_source =
     "function frame_count(exec_state) {"
@@ -646,6 +661,19 @@ static void DebugEventBreakPointHitCount(v8::DebugEvent event,
         v8::Handle<v8::String> script_data(result->ToString());
         script_data->WriteAscii(last_script_data_hit);
       }
+    }
+  } else if (event == v8::AfterCompile && !compiled_script_data.IsEmpty()) {
+    const int argc = 1;
+    v8::Handle<v8::Value> argv[argc] = { event_data };
+    v8::Handle<v8::Value> result = compiled_script_data->Call(exec_state,
+                                                              argc, argv);
+    if (result->IsUndefined()) {
+      last_script_data_hit[0] = '\0';
+    } else {
+      result = result->ToString();
+      CHECK(result->IsString());
+      v8::Handle<v8::String> script_data(result->ToString());
+      script_data->WriteAscii(last_script_data_hit);
     }
   }
 }
@@ -2483,6 +2511,50 @@ TEST(DebugStepKeyedStoreLoop) {
 }
 
 
+// Test of the stepping mechanism for named load in a loop.
+TEST(DebugStepNamedLoadLoop) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+
+  // Create a function for testing stepping of named load.
+  v8::Local<v8::Function> foo = CompileFunction(
+      &env,
+      "function foo() {\n"
+          "  var a = [];\n"
+          "  var s = \"\";\n"
+          "  for (var i = 0; i < 10; i++) {\n"
+          "    var v = new V(i, i + 1);\n"
+          "    v.y;\n"
+          "    a.length;\n"  // Special case: array length.
+          "    s.length;\n"  // Special case: string length.
+          "  }\n"
+          "}\n"
+          "function V(x, y) {\n"
+          "  this.x = x;\n"
+          "  this.y = y;\n"
+          "}\n",
+          "foo");
+
+  // Call function without any break points to ensure inlining is in place.
+  foo->Call(env->Global(), 0, NULL);
+
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
+
+  // Setup break point and step through the function.
+  SetBreakPoint(foo, 4);
+  step_action = StepNext;
+  break_point_hit_count = 0;
+  foo->Call(env->Global(), 0, NULL);
+
+  // With stepping all break locations are hit.
+  CHECK_EQ(41, break_point_hit_count);
+
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
 // Test the stepping mechanism with different ICs.
 TEST(DebugStepLinearMixedICs) {
   v8::HandleScope scope;
@@ -3884,6 +3956,11 @@ bool IsEvaluateResponseMessage(char* message) {
 }
 
 
+static int StringToInt(const char* s) {
+  return atoi(s);  // NOLINT
+}
+
+
 // We match parts of the message to get evaluate result int value.
 int GetEvaluateIntResult(char *message) {
   const char* value = "\"value\":";
@@ -3892,7 +3969,7 @@ int GetEvaluateIntResult(char *message) {
     return -1;
   }
   int res = -1;
-  res = atoi(pos + strlen(value));
+  res = StringToInt(pos + strlen(value));
   return res;
 }
 
@@ -3905,7 +3982,7 @@ int GetBreakpointIdFromBreakEventMessage(char *message) {
     return -1;
   }
   int res = -1;
-  res = atoi(pos + strlen(breakpoints));
+  res = StringToInt(pos + strlen(breakpoints));
   return res;
 }
 
@@ -3918,11 +3995,7 @@ int GetTotalFramesInt(char *message) {
     return -1;
   }
   pos += strlen(prefix);
-  char* pos_end = pos;
-  int res = static_cast<int>(strtol(pos, &pos_end, 10));
-  if (pos_end == pos) {
-    return -1;
-  }
+  int res = StringToInt(pos);
   return res;
 }
 
@@ -4632,11 +4705,9 @@ TEST(CallFunctionInDebugger) {
       v8::Script::Compile(
           v8::String::New(debugger_call_with_closure_source))->Run());
 
-  // Calling a function through the debugger returns undefined if there are no
-  // JavaScript frames.
-  CHECK(v8::Debug::Call(frame_count)->IsUndefined());
-  CHECK(v8::Debug::Call(frame_source_line)->IsUndefined());
-  CHECK(v8::Debug::Call(debugger_call_with_data)->IsUndefined());
+  // Calling a function through the debugger returns 0 frames if there are
+  // no JavaScript frames.
+  CHECK_EQ(v8::Integer::New(0), v8::Debug::Call(frame_count));
 
   // Test that the number of frames can be retrieved.
   v8::Script::Compile(v8::String::New("CheckFrameCount(1)"))->Run();
@@ -5231,6 +5302,9 @@ TEST(ScriptNameAndData) {
   frame_script_data = CompileFunction(&env,
                                       frame_script_data_source,
                                       "frame_script_data");
+  compiled_script_data = CompileFunction(&env,
+                                         compiled_script_data_source,
+                                         "compiled_script_data");
 
   v8::Debug::SetDebugEventListener(DebugEventBreakPointHitCount,
                                    v8::Undefined());
@@ -5277,6 +5351,16 @@ TEST(ScriptNameAndData) {
   CHECK_EQ(3, break_point_hit_count);
   CHECK_EQ("new name", last_script_name_hit);
   CHECK_EQ("abc 123", last_script_data_hit);
+
+  v8::Handle<v8::Script> script3 =
+      v8::Script::Compile(script, &origin2, NULL,
+                          v8::String::New("in compile"));
+  CHECK_EQ("in compile", last_script_data_hit);
+  script3->Run();
+  f = v8::Local<v8::Function>::Cast(env->Global()->Get(v8::String::New("f")));
+  f->Call(env->Global(), 0, NULL);
+  CHECK_EQ(4, break_point_hit_count);
+  CHECK_EQ("in compile", last_script_data_hit);
 }
 
 
@@ -5405,7 +5489,7 @@ TEST(DebugBreakInMessageHandler) {
 }
 
 
-#ifdef V8_NATIVE_REGEXP
+#ifndef V8_INTERPRETED_REGEXP
 // Debug event handler which gets the function on the top frame and schedules a
 // break a number of times.
 static void DebugEventDebugBreak(
@@ -5472,7 +5556,7 @@ TEST(RegExpDebugBreak) {
   CHECK_EQ(1, break_point_hit_count);
   CHECK_EQ("f", last_function_hit);
 }
-#endif  // V8_NATIVE_REGEXP
+#endif  // V8_INTERPRETED_REGEXP
 
 
 // Common part of EvalContextData and NestedBreakEventContextData tests.
@@ -5922,7 +6006,7 @@ TEST(ProcessDebugMessages) {
 }
 
 
-struct BracktraceData {
+struct BacktraceData {
   static int frame_counter;
   static void MessageHandler(const v8::Debug::Message& message) {
     char print_buffer[1000];
@@ -5936,7 +6020,7 @@ struct BracktraceData {
   }
 };
 
-int BracktraceData::frame_counter;
+int BacktraceData::frame_counter;
 
 
 // Test that debug messages get processed when ProcessDebugMessages is called.
@@ -5944,7 +6028,7 @@ TEST(Backtrace) {
   v8::HandleScope scope;
   DebugLocalContext env;
 
-  v8::Debug::SetMessageHandler2(BracktraceData::MessageHandler);
+  v8::Debug::SetMessageHandler2(BacktraceData::MessageHandler);
 
   const int kBufferSize = 1000;
   uint16_t buffer[kBufferSize];
@@ -5954,19 +6038,19 @@ TEST(Backtrace) {
      "\"command\":\"backtrace\"}";
 
   // Check backtrace from ProcessDebugMessages.
-  BracktraceData::frame_counter = -10;
+  BacktraceData::frame_counter = -10;
   v8::Debug::SendCommand(buffer, AsciiToUtf16(scripts_command, buffer));
   v8::Debug::ProcessDebugMessages();
-  CHECK_EQ(BracktraceData::frame_counter, 0);
+  CHECK_EQ(BacktraceData::frame_counter, 0);
 
   v8::Handle<v8::String> void0 = v8::String::New("void(0)");
   v8::Handle<v8::Script> script = v8::Script::Compile(void0, void0);
 
   // Check backtrace from "void(0)" script.
-  BracktraceData::frame_counter = -10;
+  BacktraceData::frame_counter = -10;
   v8::Debug::SendCommand(buffer, AsciiToUtf16(scripts_command, buffer));
   script->Run();
-  CHECK_EQ(BracktraceData::frame_counter, 1);
+  CHECK_EQ(BacktraceData::frame_counter, 1);
 
   // Get rid of the debug message handler.
   v8::Debug::SetMessageHandler2(NULL);
@@ -6105,3 +6189,35 @@ TEST(CallingContextIsNotDebugContext) {
   debugger_context = v8::Handle<v8::Context>();
   CheckDebuggerUnloaded();
 }
+
+
+TEST(DebugContextIsPreservedBetweenAccesses) {
+  v8::HandleScope scope;
+  v8::Local<v8::Context> context1 = v8::Debug::GetDebugContext();
+  v8::Local<v8::Context> context2 = v8::Debug::GetDebugContext();
+  CHECK_EQ(*context1, *context2);
+}
+
+
+static v8::Handle<v8::Value> expected_callback_data;
+static void DebugEventContextChecker(const v8::Debug::EventDetails& details) {
+  CHECK(details.GetEventContext() == expected_context);
+  CHECK_EQ(expected_callback_data, details.GetCallbackData());
+}
+
+// Check that event details contain context where debug event occured.
+TEST(DebugEventContext) {
+  v8::HandleScope scope;
+  expected_callback_data = v8::Int32::New(2010);
+  v8::Debug::SetDebugEventListener2(DebugEventContextChecker,
+                                    expected_callback_data);
+  expected_context = v8::Context::New();
+  v8::Context::Scope context_scope(expected_context);
+  v8::Script::Compile(v8::String::New("(function(){debugger;})();"))->Run();
+  expected_context.Dispose();
+  expected_context.Clear();
+  v8::Debug::SetDebugEventListener(NULL);
+  expected_context_data = v8::Handle<v8::Value>();
+  CheckDebuggerUnloaded();
+}
+

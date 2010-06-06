@@ -1,4 +1,4 @@
-// Copyright 2009 the V8 project authors. All rights reserved.
+// Copyright 2010 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -31,6 +31,7 @@
 #include "v8.h"
 
 #include "ast.h"
+#include "compiler.h"
 
 namespace v8 {
 namespace internal {
@@ -68,11 +69,9 @@ class FullCodeGenerator: public AstVisitor {
     SECONDARY
   };
 
-  FullCodeGenerator(MacroAssembler* masm, Handle<Script> script, bool is_eval)
+  explicit FullCodeGenerator(MacroAssembler* masm)
       : masm_(masm),
-        script_(script),
-        is_eval_(is_eval),
-        function_(NULL),
+        info_(NULL),
         nesting_stack_(NULL),
         loop_depth_(0),
         location_(kStack),
@@ -80,11 +79,9 @@ class FullCodeGenerator: public AstVisitor {
         false_label_(NULL) {
   }
 
-  static Handle<Code> MakeCode(FunctionLiteral* fun,
-                               Handle<Script> script,
-                               bool is_eval);
+  static Handle<Code> MakeCode(CompilationInfo* info);
 
-  void Generate(FunctionLiteral* fun, Mode mode);
+  void Generate(CompilationInfo* info, Mode mode);
 
  private:
   class Breakable;
@@ -233,8 +230,6 @@ class FullCodeGenerator: public AstVisitor {
       return stack_depth + kForInStackElementCount;
     }
    private:
-    // TODO(lrn): Check that this value is correct when implementing
-    // for-in.
     static const int kForInStackElementCount = 5;
     DISALLOW_COPY_AND_ASSIGN(ForIn);
   };
@@ -262,11 +257,21 @@ class FullCodeGenerator: public AstVisitor {
   // context.
   void DropAndApply(int count, Expression::Context context, Register reg);
 
+  // Set up branch labels for a test expression.
+  void PrepareTest(Label* materialize_true,
+                   Label* materialize_false,
+                   Label** if_true,
+                   Label** if_false);
+
   // Emit code to convert pure control flow to a pair of labels into the
   // result expected according to an expression context.
   void Apply(Expression::Context context,
              Label* materialize_true,
              Label* materialize_false);
+
+  // Emit code to convert constant control flow (true or false) into
+  // the result expected according to an expression context.
+  void Apply(Expression::Context context, bool flag);
 
   // Helper function to convert a pure value into a test context.  The value
   // is expected on the stack or the accumulator, depending on the platform.
@@ -352,6 +357,12 @@ class FullCodeGenerator: public AstVisitor {
   void VisitDeclarations(ZoneList<Declaration*>* declarations);
   void DeclareGlobals(Handle<FixedArray> pairs);
 
+  // Platform-specific code for a variable, constant, or function
+  // declaration.  Functions have an initial value.
+  void EmitDeclaration(Variable* variable,
+                       Variable::Mode mode,
+                       FunctionLiteral* function);
+
   // Platform-specific return sequence
   void EmitReturnSequence(int position);
 
@@ -359,8 +370,48 @@ class FullCodeGenerator: public AstVisitor {
   void EmitCallWithStub(Call* expr);
   void EmitCallWithIC(Call* expr, Handle<Object> name, RelocInfo::Mode mode);
 
+
+  // Platform-specific code for inline runtime calls.
+  void EmitInlineRuntimeCall(CallRuntime* expr);
+  void EmitIsSmi(ZoneList<Expression*>* arguments);
+  void EmitIsNonNegativeSmi(ZoneList<Expression*>* arguments);
+  void EmitIsObject(ZoneList<Expression*>* arguments);
+  void EmitIsUndetectableObject(ZoneList<Expression*>* arguments);
+  void EmitIsFunction(ZoneList<Expression*>* arguments);
+  void EmitIsArray(ZoneList<Expression*>* arguments);
+  void EmitIsRegExp(ZoneList<Expression*>* arguments);
+  void EmitIsConstructCall(ZoneList<Expression*>* arguments);
+  void EmitObjectEquals(ZoneList<Expression*>* arguments);
+  void EmitArguments(ZoneList<Expression*>* arguments);
+  void EmitArgumentsLength(ZoneList<Expression*>* arguments);
+  void EmitClassOf(ZoneList<Expression*>* arguments);
+  void EmitValueOf(ZoneList<Expression*>* arguments);
+  void EmitSetValueOf(ZoneList<Expression*>* arguments);
+  void EmitNumberToString(ZoneList<Expression*>* arguments);
+  void EmitStringCharFromCode(ZoneList<Expression*>* arguments);
+  void EmitStringCharCodeAt(ZoneList<Expression*>* arguments);
+  void EmitStringCharAt(ZoneList<Expression*>* arguments);
+  void EmitStringCompare(ZoneList<Expression*>* arguments);
+  void EmitStringAdd(ZoneList<Expression*>* arguments);
+  void EmitLog(ZoneList<Expression*>* arguments);
+  void EmitRandomHeapNumber(ZoneList<Expression*>* arguments);
+  void EmitSubString(ZoneList<Expression*>* arguments);
+  void EmitRegExpExec(ZoneList<Expression*>* arguments);
+  void EmitMathPow(ZoneList<Expression*>* arguments);
+  void EmitMathSin(ZoneList<Expression*>* arguments);
+  void EmitMathCos(ZoneList<Expression*>* arguments);
+  void EmitMathSqrt(ZoneList<Expression*>* arguments);
+  void EmitCallFunction(ZoneList<Expression*>* arguments);
+  void EmitRegExpConstructResult(ZoneList<Expression*>* arguments);
+  void EmitSwapElements(ZoneList<Expression*>* arguments);
+  void EmitGetFromCache(ZoneList<Expression*>* arguments);
+
   // Platform-specific code for loading variables.
   void EmitVariableLoad(Variable* expr, Expression::Context context);
+
+  // Platform-specific support for allocating a new closure based on
+  // the given function info.
+  void EmitNewClosure(Handle<SharedFunctionInfo> info);
 
   // Platform-specific support for compiling assignments.
 
@@ -376,9 +427,15 @@ class FullCodeGenerator: public AstVisitor {
   // of the stack and the right one in the accumulator.
   void EmitBinaryOp(Token::Value op, Expression::Context context);
 
+  // Assign to the given expression as if via '='. The right-hand-side value
+  // is expected in the accumulator.
+  void EmitAssignment(Expression* expr);
+
   // Complete a variable assignment.  The right-hand-side value is expected
   // in the accumulator.
-  void EmitVariableAssignment(Variable* var, Expression::Context context);
+  void EmitVariableAssignment(Variable* var,
+                              Token::Value op,
+                              Expression::Context context);
 
   // Complete a named property assignment.  The receiver is expected on top
   // of the stack and the right-hand-side value in the accumulator.
@@ -388,6 +445,14 @@ class FullCodeGenerator: public AstVisitor {
   // expected on top of the stack and the right-hand-side value in the
   // accumulator.
   void EmitKeyedPropertyAssignment(Assignment* expr);
+
+  // Helper for compare operations. Expects the null-value in a register.
+  void EmitNullCompare(bool strict,
+                       Register obj,
+                       Register null_const,
+                       Label* if_true,
+                       Label* if_false,
+                       Register scratch);
 
   void SetFunctionPosition(FunctionLiteral* fun);
   void SetReturnPosition(FunctionLiteral* fun);
@@ -408,6 +473,12 @@ class FullCodeGenerator: public AstVisitor {
   }
 
   MacroAssembler* masm() { return masm_; }
+
+  Handle<Script> script() { return info_->script(); }
+  bool is_eval() { return info_->is_eval(); }
+  FunctionLiteral* function() { return info_->function(); }
+  Scope* scope() { return info_->scope(); }
+
   static Register result_register();
   static Register context_register();
 
@@ -427,10 +498,7 @@ class FullCodeGenerator: public AstVisitor {
   void EmitLogicalOperation(BinaryOperation* expr);
 
   MacroAssembler* masm_;
-  Handle<Script> script_;
-  bool is_eval_;
-
-  FunctionLiteral* function_;
+  CompilationInfo* info_;
 
   Label return_label_;
   NestedStatement* nesting_stack_;

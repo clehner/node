@@ -133,7 +133,8 @@ Object* Heap::AllocateRawMap() {
 #ifdef DEBUG
   if (!result->IsFailure()) {
     // Maps have their own alignment.
-    CHECK((OffsetFrom(result) & kMapAlignmentMask) == kHeapObjectTag);
+    CHECK((reinterpret_cast<intptr_t>(result) & kMapAlignmentMask) ==
+          static_cast<intptr_t>(kHeapObjectTag));
   }
 #endif
   return result;
@@ -183,7 +184,19 @@ void Heap::RecordWrite(Address address, int offset) {
   if (new_space_.Contains(address)) return;
   ASSERT(!new_space_.FromSpaceContains(address));
   SLOW_ASSERT(Contains(address + offset));
-  Page::SetRSet(address, offset);
+  Page::FromAddress(address)->MarkRegionDirty(address + offset);
+}
+
+
+void Heap::RecordWrites(Address address, int start, int len) {
+  if (new_space_.Contains(address)) return;
+  ASSERT(!new_space_.FromSpaceContains(address));
+  for (int offset = start;
+       offset < start + len * kPointerSize;
+       offset += kPointerSize) {
+    SLOW_ASSERT(Contains(address + offset));
+    Page::FromAddress(address)->MarkRegionDirty(address + offset);
+  }
 }
 
 
@@ -221,22 +234,70 @@ AllocationSpace Heap::TargetSpaceId(InstanceType type) {
 }
 
 
-void Heap::CopyBlock(Object** dst, Object** src, int byte_size) {
+void Heap::CopyBlock(Address dst, Address src, int byte_size) {
+  ASSERT(IsAligned(byte_size, kPointerSize));
+  CopyWords(reinterpret_cast<Object**>(dst),
+            reinterpret_cast<Object**>(src),
+            byte_size / kPointerSize);
+}
+
+
+void Heap::CopyBlockToOldSpaceAndUpdateRegionMarks(Address dst,
+                                                   Address src,
+                                                   int byte_size) {
   ASSERT(IsAligned(byte_size, kPointerSize));
 
-  // Use block copying memcpy if the segment we're copying is
-  // enough to justify the extra call/setup overhead.
-  static const int kBlockCopyLimit = 16 * kPointerSize;
+  Page* page = Page::FromAddress(dst);
+  uint32_t marks = page->GetRegionMarks();
 
-  if (byte_size >= kBlockCopyLimit) {
-    memcpy(dst, src, byte_size);
-  } else {
-    int remaining = byte_size / kPointerSize;
-    do {
-      remaining--;
-      *dst++ = *src++;
-    } while (remaining > 0);
+  for (int remaining = byte_size / kPointerSize;
+       remaining > 0;
+       remaining--) {
+    Memory::Object_at(dst) = Memory::Object_at(src);
+
+    if (Heap::InNewSpace(Memory::Object_at(dst))) {
+      marks |= page->GetRegionMaskForAddress(dst);
+    }
+
+    dst += kPointerSize;
+    src += kPointerSize;
   }
+
+  page->SetRegionMarks(marks);
+}
+
+
+void Heap::MoveBlock(Address dst, Address src, int byte_size) {
+  ASSERT(IsAligned(byte_size, kPointerSize));
+
+  int size_in_words = byte_size / kPointerSize;
+
+  if ((dst < src) || (dst >= (src + size_in_words))) {
+    ASSERT((dst >= (src + size_in_words)) ||
+           ((OffsetFrom(reinterpret_cast<Address>(src)) -
+             OffsetFrom(reinterpret_cast<Address>(dst))) >= kPointerSize));
+
+    Object** src_slot = reinterpret_cast<Object**>(src);
+    Object** dst_slot = reinterpret_cast<Object**>(dst);
+    Object** end_slot = src_slot + size_in_words;
+
+    while (src_slot != end_slot) {
+      *dst_slot++ = *src_slot++;
+    }
+  } else {
+    memmove(dst, src, byte_size);
+  }
+}
+
+
+void Heap::MoveBlockToOldSpaceAndUpdateRegionMarks(Address dst,
+                                                   Address src,
+                                                   int byte_size) {
+  ASSERT(IsAligned(byte_size, kPointerSize));
+  ASSERT((dst >= (src + byte_size)) ||
+         ((OffsetFrom(src) - OffsetFrom(dst)) >= kPointerSize));
+
+  CopyBlockToOldSpaceAndUpdateRegionMarks(dst, src, byte_size);
 }
 
 
@@ -258,6 +319,25 @@ void Heap::ScavengeObject(HeapObject** p, HeapObject* object) {
 
   // Call the slow part of scavenge object.
   return ScavengeObjectSlow(p, object);
+}
+
+
+Object* Heap::PrepareForCompare(String* str) {
+  // Always flatten small strings and force flattening of long strings
+  // after we have accumulated a certain amount we failed to flatten.
+  static const int kMaxAlwaysFlattenLength = 32;
+  static const int kFlattenLongThreshold = 16*KB;
+
+  const int length = str->length();
+  Object* obj = str->TryFlatten();
+  if (length <= kMaxAlwaysFlattenLength ||
+      unflattened_strings_length_ >= kFlattenLongThreshold) {
+    return obj;
+  }
+  if (obj->IsFailure()) {
+    unflattened_strings_length_ += length;
+  }
+  return str;
 }
 
 

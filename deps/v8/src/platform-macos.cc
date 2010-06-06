@@ -39,6 +39,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
+#include <libkern/OSAtomic.h>
 #include <mach/mach.h>
 #include <mach/semaphore.h>
 #include <mach/task.h>
@@ -259,6 +260,12 @@ int OS::ActivationFrameAlignment() {
 }
 
 
+void OS::ReleaseStore(volatile AtomicWord* ptr, AtomicWord value) {
+  OSMemoryBarrier();
+  *ptr = value;
+}
+
+
 const char* OS::LocalTimezone(double time) {
   if (isnan(time)) return "";
   time_t tv = static_cast<time_t>(floor(time/msPerSecond));
@@ -283,13 +290,12 @@ int OS::StackWalk(Vector<StackFrame> frames) {
     return 0;
 
   int frames_size = frames.length();
-  void** addresses = NewArray<void*>(frames_size);
-  int frames_count = backtrace(addresses, frames_size);
+  ScopedVector<void*> addresses(frames_size);
 
-  char** symbols;
-  symbols = backtrace_symbols(addresses, frames_count);
+  int frames_count = backtrace(addresses.start(), frames_size);
+
+  char** symbols = backtrace_symbols(addresses.start(), frames_count);
   if (symbols == NULL) {
-    DeleteArray(addresses);
     return kStackWalkError;
   }
 
@@ -305,7 +311,6 @@ int OS::StackWalk(Vector<StackFrame> frames) {
     frames[i].text[kStackWalkMaxTextLen - 1] = '\0';
   }
 
-  DeleteArray(addresses);
   free(symbols);
 
   return frames_count;
@@ -544,10 +549,14 @@ class Sampler::PlatformData : public Malloced {
 
   // Sampler thread handler.
   void Runner() {
-    // Loop until the sampler is disengaged.
-    while (sampler_->IsActive()) {
-      TickSample sample;
+    // Loop until the sampler is disengaged, keeping the specified samling freq.
+    for ( ; sampler_->IsActive(); OS::Sleep(sampler_->interval_)) {
+      TickSample sample_obj;
+      TickSample* sample = CpuProfiler::TickSampleEvent();
+      if (sample == NULL) sample = &sample_obj;
 
+      // We always sample the VM state.
+      sample->state = VMState::current_state();
       // If profiling, we record the pc and sp of the profiled thread.
       if (sampler_->IsProfiling()
           && KERN_SUCCESS == thread_suspend(profiled_thread_)) {
@@ -577,21 +586,16 @@ class Sampler::PlatformData : public Malloced {
                              flavor,
                              reinterpret_cast<natural_t*>(&state),
                              &count) == KERN_SUCCESS) {
-          sample.pc = reinterpret_cast<Address>(state.REGISTER_FIELD(ip));
-          sample.sp = reinterpret_cast<Address>(state.REGISTER_FIELD(sp));
-          sample.fp = reinterpret_cast<Address>(state.REGISTER_FIELD(bp));
-          sampler_->SampleStack(&sample);
+          sample->pc = reinterpret_cast<Address>(state.REGISTER_FIELD(ip));
+          sample->sp = reinterpret_cast<Address>(state.REGISTER_FIELD(sp));
+          sample->fp = reinterpret_cast<Address>(state.REGISTER_FIELD(bp));
+          sampler_->SampleStack(sample);
         }
         thread_resume(profiled_thread_);
       }
 
-      // We always sample the VM state.
-      sample.state = Logger::state();
       // Invoke tick handler with program counter and stack pointer.
-      sampler_->Tick(&sample);
-
-      // Wait until next sampling.
-      usleep(sampler_->interval_ * 1000);
+      sampler_->Tick(sample);
     }
   }
 };

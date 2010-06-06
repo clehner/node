@@ -84,6 +84,12 @@ void OS::Setup() {
 }
 
 
+void OS::ReleaseStore(volatile AtomicWord* ptr, AtomicWord value) {
+  __asm__ __volatile__("" : : : "memory");
+  *ptr = value;
+}
+
+
 uint64_t OS::CpuFeaturesImpliedByPlatform() {
   return 0;  // FreeBSD runs on anything.
 }
@@ -192,7 +198,8 @@ void OS::Abort() {
 
 
 void OS::DebugBreak() {
-#if defined(__arm__) || defined(__thumb__)
+#if (defined(__arm__) || defined(__thumb__)) && \
+    defined(CAN_USE_ARMV5_INSTRUCTIONS)
   asm("bkpt 0");
 #else
   asm("int $3");
@@ -285,14 +292,12 @@ void OS::LogSharedLibraryAddresses() {
 
 int OS::StackWalk(Vector<OS::StackFrame> frames) {
   int frames_size = frames.length();
-  void** addresses = NewArray<void*>(frames_size);
+  ScopedVector<void*> addresses(frames_size);
 
-  int frames_count = backtrace(addresses, frames_size);
+  int frames_count = backtrace(addresses.start(), frames_size);
 
-  char** symbols;
-  symbols = backtrace_symbols(addresses, frames_count);
+  char** symbols = backtrace_symbols(addresses.start(), frames_count);
   if (symbols == NULL) {
-    DeleteArray(addresses);
     return kStackWalkError;
   }
 
@@ -307,7 +312,6 @@ int OS::StackWalk(Vector<OS::StackFrame> frames) {
     frames[i].text[kStackWalkMaxTextLen - 1] = '\0';
   }
 
-  DeleteArray(addresses);
   free(symbols);
 
   return frames_count;
@@ -567,6 +571,9 @@ static void ProfilerSignalHandler(int signal, siginfo_t* info, void* context) {
 
   TickSample sample;
 
+  // We always sample the VM state.
+  sample.state = VMState::current_state();
+
   // If profiling, we extract the current pc and sp.
   if (active_sampler_->IsProfiling()) {
     // Extracting the sample from the context is extremely machine dependent.
@@ -587,9 +594,6 @@ static void ProfilerSignalHandler(int signal, siginfo_t* info, void* context) {
 #endif
     active_sampler_->SampleStack(&sample);
   }
-
-  // We always sample the VM state.
-  sample.state = Logger::state();
 
   active_sampler_->Tick(&sample);
 }

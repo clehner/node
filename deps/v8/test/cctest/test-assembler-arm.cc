@@ -47,9 +47,6 @@ static v8::Persistent<v8::Context> env;
 
 // The test framework does not accept flags on the command line, so we set them
 static void InitializeVM() {
-  // disable compilation of natives by specifying an empty natives file
-  FLAG_natives_file = "";
-
   // enable generation of comments
   FLAG_debug_code = true;
 
@@ -280,6 +277,42 @@ TEST(4) {
     CHECK_EQ(4.25, t.c);
     CHECK_EQ(4.25, t.b);
     CHECK_EQ(1.5, t.a);
+  }
+}
+
+
+TEST(5) {
+  // Test the ARMv7 bitfield instructions.
+  InitializeVM();
+  v8::HandleScope scope;
+
+  Assembler assm(NULL, 0);
+
+  if (CpuFeatures::IsSupported(ARMv7)) {
+    CpuFeatures::Scope scope(ARMv7);
+    // On entry, r0 = 0xAAAAAAAA = 0b10..10101010.
+    __ ubfx(r0, r0, 1, 12);  // 0b00..010101010101 = 0x555
+    __ sbfx(r0, r0, 0, 5);   // 0b11..111111110101 = -11
+    __ bfc(r0, 1, 3);        // 0b11..111111110001 = -15
+    __ mov(r1, Operand(7));
+    __ bfi(r0, r1, 3, 3);    // 0b11..111111111001 = -7
+    __ mov(pc, Operand(lr));
+
+    CodeDesc desc;
+    assm.GetCode(&desc);
+    Object* code = Heap::CreateCode(desc,
+                                    NULL,
+                                    Code::ComputeFlags(Code::STUB),
+                                    Handle<Object>(Heap::undefined_value()));
+    CHECK(code->IsCode());
+#ifdef DEBUG
+    Code::cast(code)->Print();
+#endif
+    F1 f = FUNCTION_CAST<F1>(Code::cast(code)->entry());
+    int res = reinterpret_cast<int>(
+                CALL_GENERATED_CODE(f, 0xAAAAAAAA, 0, 0, 0, 0));
+    ::printf("f() = %d\n", res);
+    CHECK_EQ(-7, res);
   }
 }
 

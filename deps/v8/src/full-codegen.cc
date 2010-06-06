@@ -30,8 +30,10 @@
 #include "codegen-inl.h"
 #include "compiler.h"
 #include "full-codegen.h"
+#include "scopes.h"
 #include "stub-cache.h"
 #include "debug.h"
+#include "liveedit.h"
 
 namespace v8 {
 namespace internal {
@@ -210,9 +212,9 @@ void FullCodeGenSyntaxChecker::VisitFunctionLiteral(FunctionLiteral* expr) {
 }
 
 
-void FullCodeGenSyntaxChecker::VisitFunctionBoilerplateLiteral(
-    FunctionBoilerplateLiteral* expr) {
-  BAILOUT("FunctionBoilerplateLiteral");
+void FullCodeGenSyntaxChecker::VisitSharedFunctionInfoLiteral(
+    SharedFunctionInfoLiteral* expr) {
+  BAILOUT("SharedFunctionInfoLiteral");
 }
 
 
@@ -439,24 +441,24 @@ void FullCodeGenSyntaxChecker::VisitThisFunction(ThisFunction* expr) {
 
 #define __ ACCESS_MASM(masm())
 
-Handle<Code> FullCodeGenerator::MakeCode(FunctionLiteral* fun,
-                                         Handle<Script> script,
-                                         bool is_eval) {
+Handle<Code> FullCodeGenerator::MakeCode(CompilationInfo* info) {
+  Handle<Script> script = info->script();
   if (!script->IsUndefined() && !script->source()->IsUndefined()) {
     int len = String::cast(script->source())->length();
     Counters::total_full_codegen_source_size.Increment(len);
   }
-  CodeGenerator::MakeCodePrologue(fun);
+  CodeGenerator::MakeCodePrologue(info);
   const int kInitialBufferSize = 4 * KB;
   MacroAssembler masm(NULL, kInitialBufferSize);
-  FullCodeGenerator cgen(&masm, script, is_eval);
-  cgen.Generate(fun, PRIMARY);
+
+  FullCodeGenerator cgen(&masm);
+  cgen.Generate(info, PRIMARY);
   if (cgen.HasStackOverflow()) {
     ASSERT(!Top::has_pending_exception());
     return Handle<Code>::null();
   }
   Code::Flags flags = Code::ComputeFlags(Code::FUNCTION, NOT_IN_LOOP);
-  return CodeGenerator::MakeCodeEpilogue(fun, &masm, flags, script);
+  return CodeGenerator::MakeCodeEpilogue(&masm, flags, info);
 }
 
 
@@ -467,7 +469,7 @@ int FullCodeGenerator::SlotOffset(Slot* slot) {
   // Adjust by a (parameter or local) base offset.
   switch (slot->type()) {
     case Slot::PARAMETER:
-      offset += (function_->scope()->num_parameters() + 1) * kPointerSize;
+      offset += (scope()->num_parameters() + 1) * kPointerSize;
       break;
     case Slot::LOCAL:
       offset += JavaScriptFrameConstants::kLocal0Offset;
@@ -519,8 +521,8 @@ void FullCodeGenerator::VisitDeclarations(
             array->set_undefined(j++);
           }
         } else {
-          Handle<JSFunction> function =
-              Compiler::BuildBoilerplate(decl->fun(), script_, this);
+          Handle<SharedFunctionInfo> function =
+              Compiler::BuildFunctionInfo(decl->fun(), script(), this);
           // Check for stack-overflow exception.
           if (HasStackOverflow()) return;
           array->set(j++, *function);
@@ -565,6 +567,78 @@ void FullCodeGenerator::SetStatementPosition(int pos) {
 void FullCodeGenerator::SetSourcePosition(int pos) {
   if (FLAG_debug_info && pos != RelocInfo::kNoPosition) {
     masm_->RecordPosition(pos);
+  }
+}
+
+
+void FullCodeGenerator::EmitInlineRuntimeCall(CallRuntime* expr) {
+  Handle<String> name = expr->name();
+  if (strcmp("_IsSmi", *name->ToCString()) == 0) {
+    EmitIsSmi(expr->arguments());
+  } else if (strcmp("_IsNonNegativeSmi", *name->ToCString()) == 0) {
+    EmitIsNonNegativeSmi(expr->arguments());
+  } else if (strcmp("_IsObject", *name->ToCString()) == 0) {
+    EmitIsObject(expr->arguments());
+  } else if (strcmp("_IsUndetectableObject", *name->ToCString()) == 0) {
+    EmitIsUndetectableObject(expr->arguments());
+  } else if (strcmp("_IsFunction", *name->ToCString()) == 0) {
+    EmitIsFunction(expr->arguments());
+  } else if (strcmp("_IsArray", *name->ToCString()) == 0) {
+    EmitIsArray(expr->arguments());
+  } else if (strcmp("_IsRegExp", *name->ToCString()) == 0) {
+    EmitIsRegExp(expr->arguments());
+  } else if (strcmp("_IsConstructCall", *name->ToCString()) == 0) {
+    EmitIsConstructCall(expr->arguments());
+  } else if (strcmp("_ObjectEquals", *name->ToCString()) == 0) {
+    EmitObjectEquals(expr->arguments());
+  } else if (strcmp("_Arguments", *name->ToCString()) == 0) {
+    EmitArguments(expr->arguments());
+  } else if (strcmp("_ArgumentsLength", *name->ToCString()) == 0) {
+    EmitArgumentsLength(expr->arguments());
+  } else if (strcmp("_ClassOf", *name->ToCString()) == 0) {
+    EmitClassOf(expr->arguments());
+  } else if (strcmp("_Log", *name->ToCString()) == 0) {
+    EmitLog(expr->arguments());
+  } else if (strcmp("_RandomHeapNumber", *name->ToCString()) == 0) {
+    EmitRandomHeapNumber(expr->arguments());
+  } else if (strcmp("_SubString", *name->ToCString()) == 0) {
+    EmitSubString(expr->arguments());
+  } else if (strcmp("_RegExpExec", *name->ToCString()) == 0) {
+    EmitRegExpExec(expr->arguments());
+  } else if (strcmp("_ValueOf", *name->ToCString()) == 0) {
+    EmitValueOf(expr->arguments());
+  } else if (strcmp("_SetValueOf", *name->ToCString()) == 0) {
+    EmitSetValueOf(expr->arguments());
+  } else if (strcmp("_NumberToString", *name->ToCString()) == 0) {
+    EmitNumberToString(expr->arguments());
+  } else if (strcmp("_StringCharFromCode", *name->ToCString()) == 0) {
+    EmitStringCharFromCode(expr->arguments());
+  } else if (strcmp("_StringCharCodeAt", *name->ToCString()) == 0) {
+    EmitStringCharCodeAt(expr->arguments());
+  } else if (strcmp("_StringCharAt", *name->ToCString()) == 0) {
+    EmitStringCharAt(expr->arguments());
+  } else if (strcmp("_StringAdd", *name->ToCString()) == 0) {
+    EmitStringAdd(expr->arguments());
+  } else if (strcmp("_StringCompare", *name->ToCString()) == 0) {
+    EmitStringCompare(expr->arguments());
+  } else if (strcmp("_MathPow", *name->ToCString()) == 0) {
+    EmitMathPow(expr->arguments());
+  } else if (strcmp("_MathSin", *name->ToCString()) == 0) {
+    EmitMathSin(expr->arguments());
+  } else if (strcmp("_MathCos", *name->ToCString()) == 0) {
+    EmitMathCos(expr->arguments());
+  } else if (strcmp("_MathSqrt", *name->ToCString()) == 0) {
+    EmitMathSqrt(expr->arguments());
+  } else if (strcmp("_CallFunction", *name->ToCString()) == 0) {
+    EmitCallFunction(expr->arguments());
+  } else if (strcmp("_RegExpConstructResult", *name->ToCString()) == 0) {
+    EmitRegExpConstructResult(expr->arguments());
+  } else if (strcmp("_SwapElements", *name->ToCString()) == 0) {
+    EmitSwapElements(expr->arguments());
+  } else if (strcmp("_GetFromCache", *name->ToCString()) == 0) {
+    EmitGetFromCache(expr->arguments());
+  } else {
+    UNREACHABLE();
   }
 }
 
@@ -758,11 +832,6 @@ void FullCodeGenerator::VisitWithExitStatement(WithExitStatement* stmt) {
 }
 
 
-void FullCodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
-  UNREACHABLE();
-}
-
-
 void FullCodeGenerator::VisitDoWhileStatement(DoWhileStatement* stmt) {
   Comment cmnt(masm_, "[ DoWhileStatement");
   SetStatementPosition(stmt);
@@ -808,6 +877,7 @@ void FullCodeGenerator::VisitWhileStatement(WhileStatement* stmt) {
   Visit(stmt->body());
 
   __ bind(loop_statement.continue_target());
+
   // Check stack before looping.
   __ StackLimitCheck(&stack_limit_hit);
   __ bind(&stack_check_success);
@@ -867,11 +937,6 @@ void FullCodeGenerator::VisitForStatement(ForStatement* stmt) {
 
   __ bind(loop_statement.break_target());
   decrement_loop_depth();
-}
-
-
-void FullCodeGenerator::VisitForInStatement(ForInStatement* stmt) {
-  UNREACHABLE();
 }
 
 
@@ -987,16 +1052,9 @@ void FullCodeGenerator::VisitDebuggerStatement(DebuggerStatement* stmt) {
   Comment cmnt(masm_, "[ DebuggerStatement");
   SetStatementPosition(stmt);
 
-  DebuggerStatementStub ces;
-  __ CallStub(&ces);
+  __ DebugBreak();
   // Ignore the return value.
 #endif
-}
-
-
-void FullCodeGenerator::VisitFunctionBoilerplateLiteral(
-    FunctionBoilerplateLiteral* expr) {
-  UNREACHABLE();
 }
 
 
@@ -1033,83 +1091,21 @@ void FullCodeGenerator::VisitLiteral(Literal* expr) {
 }
 
 
-void FullCodeGenerator::VisitAssignment(Assignment* expr) {
-  Comment cmnt(masm_, "[ Assignment");
-  ASSERT(expr->op() != Token::INIT_CONST);
-  // Left-hand side can only be a property, a global or a (parameter or local)
-  // slot. Variables with rewrite to .arguments are treated as KEYED_PROPERTY.
-  enum LhsKind { VARIABLE, NAMED_PROPERTY, KEYED_PROPERTY };
-  LhsKind assign_type = VARIABLE;
-  Property* prop = expr->target()->AsProperty();
-  if (prop != NULL) {
-    assign_type =
-        (prop->key()->IsPropertyName()) ? NAMED_PROPERTY : KEYED_PROPERTY;
-  }
+void FullCodeGenerator::VisitFunctionLiteral(FunctionLiteral* expr) {
+  Comment cmnt(masm_, "[ FunctionLiteral");
 
-  // Evaluate LHS expression.
-  switch (assign_type) {
-    case VARIABLE:
-      // Nothing to do here.
-      break;
-    case NAMED_PROPERTY:
-      VisitForValue(prop->obj(), kStack);
-      break;
-    case KEYED_PROPERTY:
-      VisitForValue(prop->obj(), kStack);
-      VisitForValue(prop->key(), kStack);
-      break;
-  }
+  // Build the function boilerplate and instantiate it.
+  Handle<SharedFunctionInfo> function_info =
+      Compiler::BuildFunctionInfo(expr, script(), this);
+  if (HasStackOverflow()) return;
+  EmitNewClosure(function_info);
+}
 
-  // If we have a compound assignment: Get value of LHS expression and
-  // store in on top of the stack.
-  if (expr->is_compound()) {
-    Location saved_location = location_;
-    location_ = kStack;
-    switch (assign_type) {
-      case VARIABLE:
-        EmitVariableLoad(expr->target()->AsVariableProxy()->var(),
-                         Expression::kValue);
-        break;
-      case NAMED_PROPERTY:
-        EmitNamedPropertyLoad(prop);
-        __ push(result_register());
-        break;
-      case KEYED_PROPERTY:
-        EmitKeyedPropertyLoad(prop);
-        __ push(result_register());
-        break;
-    }
-    location_ = saved_location;
-  }
 
-  // Evaluate RHS expression.
-  Expression* rhs = expr->value();
-  VisitForValue(rhs, kAccumulator);
-
-  // If we have a compound assignment: Apply operator.
-  if (expr->is_compound()) {
-    Location saved_location = location_;
-    location_ = kAccumulator;
-    EmitBinaryOp(expr->binary_op(), Expression::kValue);
-    location_ = saved_location;
-  }
-
-  // Record source position before possible IC call.
-  SetSourcePosition(expr->position());
-
-  // Store the value.
-  switch (assign_type) {
-    case VARIABLE:
-      EmitVariableAssignment(expr->target()->AsVariableProxy()->var(),
-                             context_);
-      break;
-    case NAMED_PROPERTY:
-      EmitNamedPropertyAssignment(expr);
-      break;
-    case KEYED_PROPERTY:
-      EmitKeyedPropertyAssignment(expr);
-      break;
-  }
+void FullCodeGenerator::VisitSharedFunctionInfoLiteral(
+    SharedFunctionInfoLiteral* expr) {
+  Comment cmnt(masm_, "[ SharedFunctionInfoLiteral");
+  EmitNewClosure(expr->shared_function_info());
 }
 
 

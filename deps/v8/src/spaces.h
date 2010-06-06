@@ -45,23 +45,46 @@ namespace internal {
 // The old generation is collected by a mark-sweep-compact collector.
 //
 // The semispaces of the young generation are contiguous.  The old and map
-// spaces consists of a list of pages. A page has a page header, a remembered
-// set area, and an object area. A page size is deliberately chosen as 8K
-// bytes. The first word of a page is an opaque page header that has the
+// spaces consists of a list of pages. A page has a page header and an object
+// area. A page size is deliberately chosen as 8K bytes.
+// The first word of a page is an opaque page header that has the
 // address of the next page and its ownership information. The second word may
-// have the allocation top address of this page. The next 248 bytes are
-// remembered sets. Heap objects are aligned to the pointer size (4 bytes). A
-// remembered set bit corresponds to a pointer in the object area.
+// have the allocation top address of this page. Heap objects are aligned to the
+// pointer size.
 //
 // There is a separate large object space for objects larger than
 // Page::kMaxHeapObjectSize, so that they do not have to move during
-// collection.  The large object space is paged and uses the same remembered
-// set implementation.  Pages in large object space may be larger than 8K.
+// collection. The large object space is paged. Pages in large object space
+// may be larger than 8K.
 //
-// NOTE: The mark-compact collector rebuilds the remembered set after a
-// collection. It reuses first a few words of the remembered set for
-// bookkeeping relocation information.
-
+// A card marking write barrier is used to keep track of intergenerational
+// references. Old space pages are divided into regions of Page::kRegionSize
+// size. Each region has a corresponding dirty bit in the page header which is
+// set if the region might contain pointers to new space. For details about
+// dirty bits encoding see comments in the Page::GetRegionNumberForAddress()
+// method body.
+//
+// During scavenges and mark-sweep collections we iterate intergenerational
+// pointers without decoding heap object maps so if the page belongs to old
+// pointer space or large object space it is essential to guarantee that
+// the page does not contain any garbage pointers to new space: every pointer
+// aligned word which satisfies the Heap::InNewSpace() predicate must be a
+// pointer to a live heap object in new space. Thus objects in old pointer
+// and large object spaces should have a special layout (e.g. no bare integer
+// fields). This requirement does not apply to map space which is iterated in
+// a special fashion. However we still require pointer fields of dead maps to
+// be cleaned.
+//
+// To enable lazy cleaning of old space pages we use a notion of allocation
+// watermark. Every pointer under watermark is considered to be well formed.
+// Page allocation watermark is not necessarily equal to page allocation top but
+// all alive objects on page should reside under allocation watermark.
+// During scavenge allocation watermark might be bumped and invalid pointers
+// might appear below it. To avoid following them we store a valid watermark
+// into special field in the page header and set a page WATERMARK_INVALIDATED
+// flag. For details see comments in the Page::SetAllocationWatermark() method
+// body.
+//
 
 // Some assertion macros used in the debugging mode.
 
@@ -91,25 +114,13 @@ class AllocationInfo;
 
 // -----------------------------------------------------------------------------
 // A page normally has 8K bytes. Large object pages may be larger.  A page
-// address is always aligned to the 8K page size.  A page is divided into
-// three areas: the first two words are used for bookkeeping, the next 248
-// bytes are used as remembered set, and the rest of the page is the object
-// area.
+// address is always aligned to the 8K page size.
 //
-// Pointers are aligned to the pointer size (4), only 1 bit is needed
-// for a pointer in the remembered set. Given an address, its remembered set
-// bit position (offset from the start of the page) is calculated by dividing
-// its page offset by 32. Therefore, the object area in a page starts at the
-// 256th byte (8K/32). Bytes 0 to 255 do not need the remembered set, so that
-// the first two words (64 bits) in a page can be used for other purposes.
-//
-// On the 64-bit platform, we add an offset to the start of the remembered set,
-// and pointers are aligned to 8-byte pointer size. This means that we need
-// only 128 bytes for the RSet, and only get two bytes free in the RSet's RSet.
-// For this reason we add an offset to get room for the Page data at the start.
+// Each page starts with a header of Page::kPageHeaderSize size which contains
+// bookkeeping data.
 //
 // The mark-compact collector transforms a map pointer into a page index and a
-// page offset. The excact encoding is described in the comments for
+// page offset. The exact encoding is described in the comments for
 // class MapWord in objects.h.
 //
 // The only way to get a page pointer is by calling factory methods:
@@ -150,25 +161,41 @@ class Page {
   // Return the end of allocation in this page. Undefined for unused pages.
   inline Address AllocationTop();
 
+  // Return the allocation watermark for the page.
+  // For old space pages it is guaranteed that the area under the watermark
+  // does not contain any garbage pointers to new space.
+  inline Address AllocationWatermark();
+
+  // Return the allocation watermark offset from the beginning of the page.
+  inline uint32_t AllocationWatermarkOffset();
+
+  inline void SetAllocationWatermark(Address allocation_watermark);
+
+  inline void SetCachedAllocationWatermark(Address allocation_watermark);
+  inline Address CachedAllocationWatermark();
+
   // Returns the start address of the object area in this page.
   Address ObjectAreaStart() { return address() + kObjectStartOffset; }
 
   // Returns the end address (exclusive) of the object area in this page.
   Address ObjectAreaEnd() { return address() + Page::kPageSize; }
 
-  // Returns the start address of the remembered set area.
-  Address RSetStart() { return address() + kRSetStartOffset; }
-
-  // Returns the end address of the remembered set area (exclusive).
-  Address RSetEnd() { return address() + kRSetEndOffset; }
-
   // Checks whether an address is page aligned.
   static bool IsAlignedToPageSize(Address a) {
     return 0 == (OffsetFrom(a) & kPageAlignmentMask);
   }
 
+  // True if this page was in use before current compaction started.
+  // Result is valid only for pages owned by paged spaces and
+  // only after PagedSpace::PrepareForMarkCompact was called.
+  inline bool WasInUseBeforeMC();
+
+  inline void SetWasInUseBeforeMC(bool was_in_use);
+
   // True if this page is a large object page.
-  bool IsLargeObjectPage() { return (is_normal_page & 0x1) == 0; }
+  inline bool IsLargeObjectPage();
+
+  inline void SetIsLargeObjectPage(bool is_large_object_page);
 
   // Returns the offset of a given address to this page.
   INLINE(int Offset(Address a)) {
@@ -184,33 +211,23 @@ class Page {
   }
 
   // ---------------------------------------------------------------------
-  // Remembered set support
+  // Card marking support
 
-  // Clears remembered set in this page.
-  inline void ClearRSet();
+  static const uint32_t kAllRegionsCleanMarks = 0x0;
+  static const uint32_t kAllRegionsDirtyMarks = 0xFFFFFFFF;
 
-  // Return the address of the remembered set word corresponding to an
-  // object address/offset pair, and the bit encoded as a single-bit
-  // mask in the output parameter 'bitmask'.
-  INLINE(static Address ComputeRSetBitPosition(Address address, int offset,
-                                               uint32_t* bitmask));
+  inline uint32_t GetRegionMarks();
+  inline void SetRegionMarks(uint32_t dirty);
 
-  // Sets the corresponding remembered set bit for a given address.
-  INLINE(static void SetRSet(Address address, int offset));
+  inline uint32_t GetRegionMaskForAddress(Address addr);
+  inline int GetRegionNumberForAddress(Address addr);
 
-  // Clears the corresponding remembered set bit for a given address.
-  static inline void UnsetRSet(Address address, int offset);
+  inline void MarkRegionDirty(Address addr);
+  inline bool IsRegionDirty(Address addr);
 
-  // Checks whether the remembered set bit for a given address is set.
-  static inline bool IsRSetSet(Address address, int offset);
-
-#ifdef DEBUG
-  // Use a state to mark whether remembered set space can be used for other
-  // purposes.
-  enum RSetState { IN_USE,  NOT_IN_USE };
-  static bool is_rset_in_use() { return rset_state_ == IN_USE; }
-  static void set_rset_state(RSetState state) { rset_state_ = state; }
-#endif
+  inline void ClearRegionMarks(Address start,
+                               Address end,
+                               bool reaches_limit);
 
   // Page size in bytes.  This must be a multiple of the OS page size.
   static const int kPageSize = 1 << kPageSizeBits;
@@ -218,31 +235,77 @@ class Page {
   // Page size mask.
   static const intptr_t kPageAlignmentMask = (1 << kPageSizeBits) - 1;
 
-  // The offset of the remembered set in a page, in addition to the empty bytes
-  // formed as the remembered bits of the remembered set itself.
-#ifdef V8_TARGET_ARCH_X64
-  static const int kRSetOffset = 4 * kPointerSize;  // Room for four pointers.
-#else
-  static const int kRSetOffset = 0;
-#endif
-  // The end offset of the remembered set in a page
-  // (heaps are aligned to pointer size).
-  static const int kRSetEndOffset = kRSetOffset + kPageSize / kBitsPerPointer;
+  static const int kPageHeaderSize = kPointerSize + kPointerSize + kIntSize +
+    kIntSize + kPointerSize;
 
   // The start offset of the object area in a page.
-  // This needs to be at least (bits per uint32_t) * kBitsPerPointer,
-  // to align start of rset to a uint32_t address.
-  static const int kObjectStartOffset = 256;
-
-  // The start offset of the used part of the remembered set in a page.
-  static const int kRSetStartOffset = kRSetOffset +
-      kObjectStartOffset / kBitsPerPointer;
+  static const int kObjectStartOffset = MAP_POINTER_ALIGN(kPageHeaderSize);
 
   // Object area size in bytes.
   static const int kObjectAreaSize = kPageSize - kObjectStartOffset;
 
   // Maximum object size that fits in a page.
   static const int kMaxHeapObjectSize = kObjectAreaSize;
+
+  static const int kDirtyFlagOffset = 2 * kPointerSize;
+  static const int kRegionSizeLog2 = 8;
+  static const int kRegionSize = 1 << kRegionSizeLog2;
+  static const intptr_t kRegionAlignmentMask = (kRegionSize - 1);
+
+  STATIC_CHECK(kRegionSize == kPageSize / kBitsPerInt);
+
+  enum PageFlag {
+    IS_NORMAL_PAGE = 1 << 0,
+    WAS_IN_USE_BEFORE_MC = 1 << 1,
+
+    // Page allocation watermark was bumped by preallocation during scavenge.
+    // Correct watermark can be retrieved by CachedAllocationWatermark() method
+    WATERMARK_INVALIDATED = 1 << 2
+  };
+
+  // To avoid an additional WATERMARK_INVALIDATED flag clearing pass during
+  // scavenge we just invalidate the watermark on each old space page after
+  // processing it. And then we flip the meaning of the WATERMARK_INVALIDATED
+  // flag at the beginning of the next scavenge and each page becomes marked as
+  // having a valid watermark.
+  //
+  // The following invariant must hold for pages in old pointer and map spaces:
+  //     If page is in use then page is marked as having invalid watermark at
+  //     the beginning and at the end of any GC.
+  //
+  // This invariant guarantees that after flipping flag meaning at the
+  // beginning of scavenge all pages in use will be marked as having valid
+  // watermark.
+  static inline void FlipMeaningOfInvalidatedWatermarkFlag();
+
+  // Returns true if the page allocation watermark was not altered during
+  // scavenge.
+  inline bool IsWatermarkValid();
+
+  inline void InvalidateWatermark(bool value);
+
+  inline bool GetPageFlag(PageFlag flag);
+  inline void SetPageFlag(PageFlag flag, bool value);
+  inline void ClearPageFlags();
+
+  inline void ClearGCFields();
+
+  static const int kAllocationWatermarkOffsetShift = 3;
+  static const int kAllocationWatermarkOffsetBits  = kPageSizeBits + 1;
+  static const uint32_t kAllocationWatermarkOffsetMask =
+      ((1 << kAllocationWatermarkOffsetBits) - 1) <<
+      kAllocationWatermarkOffsetShift;
+
+  static const uint32_t kFlagsMask =
+    ((1 << kAllocationWatermarkOffsetShift) - 1);
+
+  STATIC_CHECK(kBitsPerInt - kAllocationWatermarkOffsetShift >=
+               kAllocationWatermarkOffsetBits);
+
+  // This field contains the meaning of the WATERMARK_INVALIDATED flag.
+  // Instead of clearing this flag from all pages we just flip
+  // its meaning at the beginning of a scavenge.
+  static intptr_t watermark_invalidated_mark_;
 
   //---------------------------------------------------------------------------
   // Page header description.
@@ -262,25 +325,24 @@ class Page {
   // second word *may* (if the page start and large object chunk start are
   // the same) contain the large object chunk size.  In either case, the
   // low-order bit for large object pages will be cleared.
-  int is_normal_page;
+  // For normal pages this word is used to store page flags and
+  // offset of allocation top.
+  intptr_t flags_;
 
-  // The following fields may overlap with remembered set, they can only
-  // be used in the mark-compact collector when remembered set is not
-  // used.
+  // This field contains dirty marks for regions covering the page. Only dirty
+  // regions might contain intergenerational references.
+  // Only 32 dirty marks are supported so for large object pages several regions
+  // might be mapped to a single dirty mark.
+  uint32_t dirty_regions_;
 
   // The index of the page in its owner space.
   int mc_page_index;
 
-  // The allocation pointer after relocating objects to this page.
-  Address mc_relocation_top;
-
-  // The forwarding address of the first live object in this page.
+  // During mark-compact collections this field contains the forwarding address
+  // of the first live object in this page.
+  // During scavenge collection this field is used to store allocation watermark
+  // if it is altered during scavenge.
   Address mc_first_forwarded;
-
-#ifdef DEBUG
- private:
-  static RSetState rset_state_;  // state of the remembered set
-#endif
 };
 
 
@@ -300,6 +362,12 @@ class Space : public Malloced {
   AllocationSpace identity() { return id_; }
 
   virtual int Size() = 0;
+
+#ifdef ENABLE_HEAP_PROTECTION
+  // Protect/unprotect the space by marking it read-only/writable.
+  virtual void Protect() = 0;
+  virtual void Unprotect() = 0;
+#endif
 
 #ifdef DEBUG
   virtual void Print() = 0;
@@ -401,6 +469,13 @@ class CodeRange : public AllStatic {
 //
 // The memory allocator also allocates chunks for the large object space, but
 // they are managed by the space itself.  The new space does not expand.
+//
+// The fact that pages for paged spaces are allocated and deallocated in chunks
+// induces a constraint on the order of pages in a linked lists. We say that
+// pages are linked in the chunk-order if and only if every two consecutive
+// pages from the same chunk are consecutive in the linked list.
+//
+
 
 class MemoryAllocator : public AllStatic {
  public:
@@ -460,12 +535,17 @@ class MemoryAllocator : public AllStatic {
   static Page* AllocatePages(int requested_pages, int* allocated_pages,
                              PagedSpace* owner);
 
-  // Frees pages from a given page and after. If 'p' is the first page
-  // of a chunk, pages from 'p' are freed and this function returns an
-  // invalid page pointer. Otherwise, the function searches a page
-  // after 'p' that is the first page of a chunk. Pages after the
-  // found page are freed and the function returns 'p'.
+  // Frees pages from a given page and after. Requires pages to be
+  // linked in chunk-order (see comment for class).
+  // If 'p' is the first page of a chunk, pages from 'p' are freed
+  // and this function returns an invalid page pointer.
+  // Otherwise, the function searches a page after 'p' that is
+  // the first page of a chunk. Pages after the found page
+  // are freed and the function returns 'p'.
   static Page* FreePages(Page* p);
+
+  // Frees all pages owned by given space.
+  static void FreeAllPages(PagedSpace* space);
 
   // Allocates and frees raw memory of certain size.
   // These are just thin wrappers around OS::Allocate and OS::Free,
@@ -504,6 +584,15 @@ class MemoryAllocator : public AllStatic {
   // Finds the first/last page in the same chunk as a given page.
   static Page* FindFirstPageInSameChunk(Page* p);
   static Page* FindLastPageInSameChunk(Page* p);
+
+  // Relinks list of pages owned by space to make it chunk-ordered.
+  // Returns new first and last pages of space.
+  // Also returns last page in relinked list which has WasInUsedBeforeMC
+  // flag set.
+  static void RelinkPageListInChunkOrder(PagedSpace* space,
+                                         Page** first_page,
+                                         Page** last_page,
+                                         Page** last_page_in_use);
 
 #ifdef ENABLE_HEAP_PROTECTION
   // Protect/unprotect a block of memory by marking it read-only/writable.
@@ -593,6 +682,12 @@ class MemoryAllocator : public AllStatic {
   // used as a marking stack and its page headers are destroyed.
   static Page* InitializePagesInChunk(int chunk_id, int pages_in_chunk,
                                       PagedSpace* owner);
+
+  static Page* RelinkPagesInChunk(int chunk_id,
+                                  Address chunk_start,
+                                  size_t chunk_size,
+                                  Page* prev,
+                                  Page** last_page_in_use);
 };
 
 
@@ -870,13 +965,24 @@ class PagedSpace : public Space {
   // Checks whether page is currently in use by this space.
   bool IsUsed(Page* page);
 
-  // Clears remembered sets of pages in this space.
-  void ClearRSet();
+  void MarkAllPagesClean();
 
   // Prepares for a mark-compact GC.
-  virtual void PrepareForMarkCompact(bool will_compact) = 0;
+  virtual void PrepareForMarkCompact(bool will_compact);
 
-  virtual Address PageAllocationTop(Page* page) = 0;
+  // The top of allocation in a page in this space. Undefined if page is unused.
+  Address PageAllocationTop(Page* page) {
+    return page == TopPageOf(allocation_info_) ? top()
+        : PageAllocationLimit(page);
+  }
+
+  // The limit of allocation for a page in this space.
+  virtual Address PageAllocationLimit(Page* page) = 0;
+
+  void FlushTopPageWatermark() {
+    AllocationTopPage()->SetCachedAllocationWatermark(top());
+    AllocationTopPage()->InvalidateWatermark(true);
+  }
 
   // Current capacity without growing (Size() + Available() + Waste()).
   int Capacity() { return accounting_stats_.Capacity(); }
@@ -914,6 +1020,16 @@ class PagedSpace : public Space {
   // Used by ReserveSpace.
   virtual void PutRestOfCurrentPageOnFreeList(Page* current_page) = 0;
 
+  // Free all pages in range from prev (exclusive) to last (inclusive).
+  // Freed pages are moved to the end of page list.
+  void FreePages(Page* prev, Page* last);
+
+  // Set space allocation info.
+  void SetTop(Address top) {
+    allocation_info_.top = top;
+    allocation_info_.limit = PageAllocationLimit(Page::FromAllocationTop(top));
+  }
+
   // ---------------------------------------------------------------------------
   // Mark-compact collection support functions
 
@@ -922,7 +1038,8 @@ class PagedSpace : public Space {
 
   // Writes relocation info to the top page.
   void MCWriteRelocationInfoToPage() {
-    TopPageOf(mc_forwarding_info_)->mc_relocation_top = mc_forwarding_info_.top;
+    TopPageOf(mc_forwarding_info_)->
+        SetAllocationWatermark(mc_forwarding_info_.top);
   }
 
   // Computes the offset of a given address in this space to the beginning
@@ -962,6 +1079,9 @@ class PagedSpace : public Space {
   static void ResetCodeStatistics();
 #endif
 
+  // Returns the page of the allocation pointer.
+  Page* AllocationTopPage() { return TopPageOf(allocation_info_); }
+
  protected:
   // Maximum capacity of this space.
   int max_capacity_;
@@ -975,6 +1095,10 @@ class PagedSpace : public Space {
   // The last page in this space.  Initially set in Setup, updated in
   // Expand and Shrink.
   Page* last_page_;
+
+  // True if pages owned by this space are linked in chunk-order.
+  // See comment for class MemoryAllocator for definition of chunk-order.
+  bool page_list_is_chunk_ordered_;
 
   // Normal allocation information.
   AllocationInfo allocation_info_;
@@ -1033,12 +1157,8 @@ class PagedSpace : public Space {
 #ifdef DEBUG
   // Returns the number of total pages in this space.
   int CountTotalPages();
-
-  void DoPrintRSet(const char* space_name);
 #endif
  private:
-  // Returns the page of the allocation pointer.
-  Page* AllocationTopPage() { return TopPageOf(allocation_info_); }
 
   // Returns a pointer to the page of the relocation pointer.
   Page* MCRelocationTopPage() { return TopPageOf(mc_forwarding_info_); }
@@ -1168,6 +1288,12 @@ class SemiSpace : public Space {
   bool is_committed() { return committed_; }
   bool Commit();
   bool Uncommit();
+
+#ifdef ENABLE_HEAP_PROTECTION
+  // Protect/unprotect the space by marking it read-only/writable.
+  virtual void Protect() {}
+  virtual void Unprotect() {}
+#endif
 
 #ifdef DEBUG
   virtual void Print();
@@ -1623,6 +1749,9 @@ class FixedSizeFreeList BASE_EMBEDDED {
   // The head of the free list.
   Address head_;
 
+  // The tail of the free list.
+  Address tail_;
+
   // The identity of the owning space, for building allocation Failure
   // objects.
   AllocationSpace owner_;
@@ -1652,17 +1781,22 @@ class OldSpace : public PagedSpace {
   // pointer).
   int AvailableFree() { return free_list_.available(); }
 
-  // The top of allocation in a page in this space. Undefined if page is unused.
-  virtual Address PageAllocationTop(Page* page) {
-    return page == TopPageOf(allocation_info_) ? top() : page->ObjectAreaEnd();
+  // The limit of allocation for a page in this space.
+  virtual Address PageAllocationLimit(Page* page) {
+    return page->ObjectAreaEnd();
   }
 
   // Give a block of memory to the space's free list.  It might be added to
   // the free list or accounted as waste.
-  void Free(Address start, int size_in_bytes) {
-    int wasted_bytes = free_list_.Free(start, size_in_bytes);
+  // If add_to_freelist is false then just accounting stats are updated and
+  // no attempt to add area to free list is made.
+  void Free(Address start, int size_in_bytes, bool add_to_freelist) {
     accounting_stats_.DeallocateBytes(size_in_bytes);
-    accounting_stats_.WasteBytes(wasted_bytes);
+
+    if (add_to_freelist) {
+      int wasted_bytes = free_list_.Free(start, size_in_bytes);
+      accounting_stats_.WasteBytes(wasted_bytes);
+    }
   }
 
   // Prepare for full garbage collection.  Resets the relocation pointer and
@@ -1678,8 +1812,6 @@ class OldSpace : public PagedSpace {
 #ifdef DEBUG
   // Reports statistics for the space
   void ReportStatistics();
-  // Dump the remembered sets in the space to stdout.
-  void PrintRSet();
 #endif
 
  protected:
@@ -1715,17 +1847,20 @@ class FixedSpace : public PagedSpace {
     page_extra_ = Page::kObjectAreaSize % object_size_in_bytes;
   }
 
-  // The top of allocation in a page in this space. Undefined if page is unused.
-  virtual Address PageAllocationTop(Page* page) {
-    return page == TopPageOf(allocation_info_) ? top()
-        : page->ObjectAreaEnd() - page_extra_;
+  // The limit of allocation for a page in this space.
+  virtual Address PageAllocationLimit(Page* page) {
+    return page->ObjectAreaEnd() - page_extra_;
   }
 
   int object_size_in_bytes() { return object_size_in_bytes_; }
 
   // Give a fixed sized block of memory to the space's free list.
-  void Free(Address start) {
-    free_list_.Free(start);
+  // If add_to_freelist is false then just accounting stats are updated and
+  // no attempt to add area to free list is made.
+  void Free(Address start, bool add_to_freelist) {
+    if (add_to_freelist) {
+      free_list_.Free(start);
+    }
     accounting_stats_.DeallocateBytes(object_size_in_bytes_);
   }
 
@@ -1741,9 +1876,6 @@ class FixedSpace : public PagedSpace {
 #ifdef DEBUG
   // Reports statistic info of the space
   void ReportStatistics();
-
-  // Dump the remembered sets in the space to stdout.
-  void PrintRSet();
 #endif
 
  protected:
@@ -1812,11 +1944,11 @@ class MapSpace : public FixedSpace {
     PageIterator it(this, PageIterator::ALL_PAGES);
     while (pages_left-- > 0) {
       ASSERT(it.has_next());
-      it.next()->ClearRSet();
+      it.next()->SetRegionMarks(Page::kAllRegionsCleanMarks);
     }
     ASSERT(it.has_next());
     Page* top_page = it.next();
-    top_page->ClearRSet();
+    top_page->SetRegionMarks(Page::kAllRegionsCleanMarks);
     ASSERT(top_page->is_valid());
 
     int offset = live_maps % kMapsPerPage * Map::kSize;
@@ -1907,9 +2039,8 @@ class LargeObjectChunk {
  public:
   // Allocates a new LargeObjectChunk that contains a large object page
   // (Page::kPageSize aligned) that has at least size_in_bytes (for a large
-  // object and possibly extra remembered set words) bytes after the object
-  // area start of that page. The allocated chunk size is set in the output
-  // parameter chunk_size.
+  // object) bytes after the object area start of that page.
+  // The allocated chunk size is set in the output parameter chunk_size.
   static LargeObjectChunk* New(int size_in_bytes,
                                size_t* chunk_size,
                                Executability executable);
@@ -1932,16 +2063,12 @@ class LargeObjectChunk {
   // Returns the object in this chunk.
   inline HeapObject* GetObject();
 
-  // Given a requested size (including any extra remembered set words),
-  // returns the physical size of a chunk to be allocated.
+  // Given a requested size returns the physical size of a chunk to be
+  // allocated.
   static int ChunkSizeFor(int size_in_bytes);
 
-  // Given a chunk size, returns the object size it can accommodate (not
-  // including any extra remembered set words).  Used by
-  // LargeObjectSpace::Available.  Note that this can overestimate the size
-  // of object that will fit in a chunk---if the object requires extra
-  // remembered set words (eg, for large fixed arrays), the actual object
-  // size for the chunk will be smaller than reported by this function.
+  // Given a chunk size, returns the object size it can accommodate.  Used by
+  // LargeObjectSpace::Available.
   static int ObjectSizeFor(int chunk_size) {
     if (chunk_size <= (Page::kPageSize + Page::kObjectStartOffset)) return 0;
     return chunk_size - Page::kPageSize - Page::kObjectStartOffset;
@@ -1977,8 +2104,7 @@ class LargeObjectSpace : public Space {
   // Allocates a large FixedArray.
   Object* AllocateRawFixedArray(int size_in_bytes);
 
-  // Available bytes for objects in this space, not including any extra
-  // remembered set words.
+  // Available bytes for objects in this space.
   int Available() {
     return LargeObjectChunk::ObjectSizeFor(MemoryAllocator::Available());
   }
@@ -1996,11 +2122,8 @@ class LargeObjectSpace : public Space {
   // space, may be slow.
   Object* FindObject(Address a);
 
-  // Clears remembered sets.
-  void ClearRSet();
-
-  // Iterates objects whose remembered set bits are set.
-  void IterateRSet(ObjectSlotCallback func);
+  // Iterates objects covered by dirty regions.
+  void IterateDirtyRegions(ObjectSlotCallback func);
 
   // Frees unmarked objects.
   void FreeUnmarkedObjects();
@@ -2027,8 +2150,6 @@ class LargeObjectSpace : public Space {
   virtual void Print();
   void ReportStatistics();
   void CollectCodeStatistics();
-  // Dump the remembered sets in the space to stdout.
-  void PrintRSet();
 #endif
   // Checks whether an address is in the object area in this space.  It
   // iterates all objects in the space. May be slow.
@@ -2046,10 +2167,6 @@ class LargeObjectSpace : public Space {
   Object* AllocateRawInternal(int requested_size,
                               int object_size,
                               Executability executable);
-
-  // Returns the number of extra bytes (rounded up to the nearest full word)
-  // required for extra_object_bytes of extra pointers (in bytes).
-  static inline int ExtraRSetBytesFor(int extra_object_bytes);
 
   friend class LargeObjectIterator;
 

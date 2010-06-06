@@ -189,7 +189,7 @@ Object* Object::GetPropertyWithCallback(Object* receiver,
   }
 
   UNREACHABLE();
-  return 0;
+  return NULL;
 }
 
 
@@ -219,7 +219,7 @@ Object* JSObject::GetPropertyWithFailedAccessCheck(
     LookupResult* result,
     String* name,
     PropertyAttributes* attributes) {
-  if (result->IsValid()) {
+  if (result->IsProperty()) {
     switch (result->type()) {
       case CALLBACKS: {
         // Only allow API accessors.
@@ -242,7 +242,7 @@ Object* JSObject::GetPropertyWithFailedAccessCheck(
         // Search ALL_CAN_READ accessors in prototype chain.
         LookupResult r;
         result->holder()->LookupRealNamedPropertyInPrototypes(name, &r);
-        if (r.IsValid()) {
+        if (r.IsProperty()) {
           return GetPropertyWithFailedAccessCheck(receiver,
                                                   &r,
                                                   name,
@@ -255,16 +255,16 @@ Object* JSObject::GetPropertyWithFailedAccessCheck(
         // No access check in GetPropertyAttributeWithInterceptor.
         LookupResult r;
         result->holder()->LookupRealNamedProperty(name, &r);
-        if (r.IsValid()) {
+        if (r.IsProperty()) {
           return GetPropertyWithFailedAccessCheck(receiver,
                                                   &r,
                                                   name,
                                                   attributes);
         }
-      }
-      default: {
         break;
       }
+      default:
+        UNREACHABLE();
     }
   }
 
@@ -280,7 +280,7 @@ PropertyAttributes JSObject::GetPropertyAttributeWithFailedAccessCheck(
     LookupResult* result,
     String* name,
     bool continue_search) {
-  if (result->IsValid()) {
+  if (result->IsProperty()) {
     switch (result->type()) {
       case CALLBACKS: {
         // Only allow API accessors.
@@ -301,7 +301,7 @@ PropertyAttributes JSObject::GetPropertyAttributeWithFailedAccessCheck(
         // Search ALL_CAN_READ accessors in prototype chain.
         LookupResult r;
         result->holder()->LookupRealNamedPropertyInPrototypes(name, &r);
-        if (r.IsValid()) {
+        if (r.IsProperty()) {
           return GetPropertyAttributeWithFailedAccessCheck(receiver,
                                                            &r,
                                                            name,
@@ -319,7 +319,7 @@ PropertyAttributes JSObject::GetPropertyAttributeWithFailedAccessCheck(
         } else {
           result->holder()->LocalLookupRealNamedProperty(name, &r);
         }
-        if (r.IsValid()) {
+        if (r.IsProperty()) {
           return GetPropertyAttributeWithFailedAccessCheck(receiver,
                                                            &r,
                                                            name,
@@ -328,63 +328,13 @@ PropertyAttributes JSObject::GetPropertyAttributeWithFailedAccessCheck(
         break;
       }
 
-      default: {
-        break;
-      }
+      default:
+        UNREACHABLE();
     }
   }
 
   Top::ReportFailedAccessCheck(this, v8::ACCESS_HAS);
   return ABSENT;
-}
-
-
-Object* JSObject::GetLazyProperty(Object* receiver,
-                                  LookupResult* result,
-                                  String* name,
-                                  PropertyAttributes* attributes) {
-  HandleScope scope;
-  Handle<Object> this_handle(this);
-  Handle<Object> receiver_handle(receiver);
-  Handle<String> name_handle(name);
-  bool pending_exception;
-  LoadLazy(Handle<JSObject>(JSObject::cast(result->GetLazyValue())),
-           &pending_exception);
-  if (pending_exception) return Failure::Exception();
-  return this_handle->GetPropertyWithReceiver(*receiver_handle,
-                                              *name_handle,
-                                              attributes);
-}
-
-
-Object* JSObject::SetLazyProperty(LookupResult* result,
-                                  String* name,
-                                  Object* value,
-                                  PropertyAttributes attributes) {
-  ASSERT(!IsJSGlobalProxy());
-  HandleScope scope;
-  Handle<JSObject> this_handle(this);
-  Handle<String> name_handle(name);
-  Handle<Object> value_handle(value);
-  bool pending_exception;
-  LoadLazy(Handle<JSObject>(JSObject::cast(result->GetLazyValue())),
-           &pending_exception);
-  if (pending_exception) return Failure::Exception();
-  return this_handle->SetProperty(*name_handle, *value_handle, attributes);
-}
-
-
-Object* JSObject::DeleteLazyProperty(LookupResult* result,
-                                     String* name,
-                                     DeleteMode mode) {
-  HandleScope scope;
-  Handle<JSObject> this_handle(this);
-  Handle<String> name_handle(name);
-  bool pending_exception;
-  LoadLazy(Handle<JSObject>(JSObject::cast(result->GetLazyValue())),
-           &pending_exception);
-  if (pending_exception) return Failure::Exception();
-  return this_handle->DeleteProperty(*name_handle, mode);
 }
 
 
@@ -481,7 +431,7 @@ bool JSObject::IsDirty() {
   if (!cons_obj->IsJSFunction())
     return true;
   JSFunction* fun = JSFunction::cast(cons_obj);
-  if (!fun->shared()->function_data()->IsFunctionTemplateInfo())
+  if (!fun->shared()->IsApiFunction())
     return true;
   // If the object is fully fast case and has the same map it was
   // created with then no changes can have been made to it.
@@ -505,7 +455,7 @@ Object* Object::GetProperty(Object* receiver,
   // holder will always be the interceptor holder and the search may
   // only continue with a current object just after the interceptor
   // holder in the prototype chain.
-  Object* last = result->IsValid() ? result->holder() : Heap::null_value();
+  Object* last = result->IsProperty() ? result->holder() : Heap::null_value();
   for (Object* current = this; true; current = current->GetPrototype()) {
     if (current->IsAccessCheckNeeded()) {
       // Check if we're allowed to read from the current object. Note
@@ -531,12 +481,6 @@ Object* Object::GetProperty(Object* receiver,
     return Heap::undefined_value();
   }
   *attributes = result->GetAttributes();
-  if (!result->IsLoaded()) {
-    return JSObject::cast(this)->GetLazyProperty(receiver,
-                                                 result,
-                                                 name,
-                                                 attributes);
-  }
   Object* value;
   JSObject* holder = result->holder();
   switch (result->type()) {
@@ -674,7 +618,7 @@ static bool AnWord(String* str) {
 }
 
 
-Object* String::TryFlatten() {
+Object* String::SlowTryFlatten(PretenureFlag pretenure) {
 #ifdef DEBUG
   // Do not attempt to flatten in debug mode when allocation is not
   // allowed.  This is to avoid an assertion failure when allocating.
@@ -687,12 +631,12 @@ Object* String::TryFlatten() {
     case kConsStringTag: {
       ConsString* cs = ConsString::cast(this);
       if (cs->second()->length() == 0) {
-        return this;
+        return cs->first();
       }
       // There's little point in putting the flat string in new space if the
       // cons string is in old space.  It can never get GCed until there is
       // an old space GC.
-      PretenureFlag tenure = Heap::InNewSpace(this) ? NOT_TENURED : TENURED;
+      PretenureFlag tenure = Heap::InNewSpace(this) ? pretenure : TENURED;
       int len = length();
       Object* object;
       String* result;
@@ -725,7 +669,7 @@ Object* String::TryFlatten() {
       }
       cs->set_first(result);
       cs->set_second(Heap::empty_string());
-      return this;
+      return result;
     }
     default:
       return this;
@@ -738,11 +682,11 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
   if (FLAG_enable_slow_asserts) {
     // Assert that the resource and the string are equivalent.
     ASSERT(static_cast<size_t>(this->length()) == resource->length());
-    SmartPointer<uc16> smart_chars(NewArray<uc16>(this->length()));
-    String::WriteToFlat(this, *smart_chars, 0, this->length());
-    ASSERT(memcmp(*smart_chars,
+    ScopedVector<uc16> smart_chars(this->length());
+    String::WriteToFlat(this, smart_chars.start(), 0, this->length());
+    ASSERT(memcmp(smart_chars.start(),
                   resource->data(),
-                  resource->length() * sizeof(**smart_chars)) == 0);
+                  resource->length() * sizeof(smart_chars[0])) == 0);
   }
 #endif  // DEBUG
 
@@ -784,11 +728,11 @@ bool String::MakeExternal(v8::String::ExternalAsciiStringResource* resource) {
   if (FLAG_enable_slow_asserts) {
     // Assert that the resource and the string are equivalent.
     ASSERT(static_cast<size_t>(this->length()) == resource->length());
-    SmartPointer<char> smart_chars(NewArray<char>(this->length()));
-    String::WriteToFlat(this, *smart_chars, 0, this->length());
-    ASSERT(memcmp(*smart_chars,
+    ScopedVector<char> smart_chars(this->length());
+    String::WriteToFlat(this, smart_chars.start(), 0, this->length());
+    ASSERT(memcmp(smart_chars.start(),
                   resource->data(),
-                  resource->length()*sizeof(**smart_chars)) == 0);
+                  resource->length() * sizeof(smart_chars[0])) == 0);
   }
 #endif  // DEBUG
 
@@ -1245,8 +1189,7 @@ String* JSObject::class_name() {
 
 String* JSObject::constructor_name() {
   if (IsJSFunction()) {
-    return JSFunction::cast(this)->IsBoilerplate() ?
-      Heap::function_class_symbol() : Heap::closure_symbol();
+    return Heap::closure_symbol();
   }
   if (map()->constructor()->IsJSFunction()) {
     JSFunction* constructor = JSFunction::cast(map()->constructor());
@@ -1463,8 +1406,12 @@ Object* JSObject::SetPropertyPostInterceptor(String* name,
   // Check local property, ignore interceptor.
   LookupResult result;
   LocalLookupRealNamedProperty(name, &result);
-  if (result.IsValid()) return SetProperty(&result, name, value, attributes);
-  // Add real property.
+  if (result.IsFound()) {
+    // An existing property, a map transition or a null descriptor was
+    // found.  Use set property to handle all these cases.
+    return SetProperty(&result, name, value, attributes);
+  }
+  // Add a new real property.
   return AddProperty(name, value, attributes);
 }
 
@@ -1666,7 +1613,7 @@ Object* JSObject::SetPropertyWithCallback(Object* structure,
   }
 
   UNREACHABLE();
-  return 0;
+  return NULL;
 }
 
 
@@ -1696,8 +1643,8 @@ void JSObject::LookupCallbackSetterInPrototypes(String* name,
        pt != Heap::null_value();
        pt = pt->GetPrototype()) {
     JSObject::cast(pt)->LocalLookupRealNamedProperty(name, result);
-    if (result->IsValid()) {
-      if (!result->IsTransitionType() && result->IsReadOnly()) {
+    if (result->IsProperty()) {
+      if (result->IsReadOnly()) {
         result->NotFound();
         return;
       }
@@ -1710,7 +1657,8 @@ void JSObject::LookupCallbackSetterInPrototypes(String* name,
 }
 
 
-Object* JSObject::LookupCallbackSetterInPrototypes(uint32_t index) {
+bool JSObject::SetElementWithCallbackSetterInPrototypes(uint32_t index,
+                                                        Object* value) {
   for (Object* pt = GetPrototype();
        pt != Heap::null_value();
        pt = pt->GetPrototype()) {
@@ -1723,12 +1671,12 @@ Object* JSObject::LookupCallbackSetterInPrototypes(uint32_t index) {
       Object* element = dictionary->ValueAt(entry);
       PropertyDetails details = dictionary->DetailsAt(entry);
       if (details.type() == CALLBACKS) {
-        // Only accessors allowed as elements.
-        return FixedArray::cast(element)->get(kSetterIndex);
+        SetElementWithCallback(element, index, value, JSObject::cast(pt));
+        return true;
       }
     }
   }
-  return Heap::undefined_value();
+  return false;
 }
 
 
@@ -1758,7 +1706,11 @@ void JSObject::LocalLookupRealNamedProperty(String* name,
 
   if (HasFastProperties()) {
     LookupInDescriptor(name, result);
-    if (result->IsValid()) {
+    if (result->IsFound()) {
+      // A property, a map transition or a null descriptor was found.
+      // We return all of these result types because
+      // LocalLookupRealNamedProperty is used when setting properties
+      // where map transitions and null descriptors are handled.
       ASSERT(result->holder() == this && result->type() != NORMAL);
       // Disallow caching for uninitialized constants. These can only
       // occur as fields.
@@ -1779,7 +1731,6 @@ void JSObject::LocalLookupRealNamedProperty(String* name,
           return;
         }
         value = JSGlobalPropertyCell::cast(value)->value();
-        ASSERT(result->IsLoaded());
       }
       // Make sure to disallow caching for uninitialized constants
       // found in the dictionary-mode objects.
@@ -1808,16 +1759,7 @@ void JSObject::LookupRealNamedPropertyInPrototypes(String* name,
        pt != Heap::null_value();
        pt = JSObject::cast(pt)->GetPrototype()) {
     JSObject::cast(pt)->LocalLookupRealNamedProperty(name, result);
-    if (result->IsValid()) {
-      switch (result->type()) {
-        case NORMAL:
-        case FIELD:
-        case CONSTANT_FUNCTION:
-        case CALLBACKS:
-          return;
-        default: break;
-      }
-    }
+    if (result->IsProperty() && (result->type() != INTERCEPTOR)) return;
   }
   result->NotFound();
 }
@@ -1903,18 +1845,16 @@ Object* JSObject::SetProperty(LookupResult* result,
     // accessor that wants to handle the property.
     LookupResult accessor_result;
     LookupCallbackSetterInPrototypes(name, &accessor_result);
-    if (accessor_result.IsValid()) {
+    if (accessor_result.IsProperty()) {
       return SetPropertyWithCallback(accessor_result.GetCallbackObject(),
                                      name,
                                      value,
                                      accessor_result.holder());
     }
   }
-  if (result->IsNotFound()) {
+  if (!result->IsFound()) {
+    // Neither properties nor transitions found.
     return AddProperty(name, value, attributes);
-  }
-  if (!result->IsLoaded()) {
-    return SetLazyProperty(result, name, value, attributes);
   }
   if (result->IsReadOnly() && result->IsProperty()) return value;
   // This is a real property that is not read-only, or it is a
@@ -1972,15 +1912,12 @@ Object* JSObject::IgnoreAttributesAndSetLocalProperty(
   // Make sure that the top context does not change when doing callbacks or
   // interceptor calls.
   AssertNoContextChange ncc;
-  // ADDED TO CLONE
-  LookupResult result_struct;
-  LocalLookup(name, &result_struct);
-  LookupResult* result = &result_struct;
-  // END ADDED TO CLONE
+  LookupResult result;
+  LocalLookup(name, &result);
   // Check access rights if needed.
   if (IsAccessCheckNeeded()
-    && !Top::MayNamedAccess(this, name, v8::ACCESS_SET)) {
-    return SetPropertyWithFailedAccessCheck(result, name, value);
+      && !Top::MayNamedAccess(this, name, v8::ACCESS_SET)) {
+    return SetPropertyWithFailedAccessCheck(&result, name, value);
   }
 
   if (IsJSGlobalProxy()) {
@@ -1994,31 +1931,32 @@ Object* JSObject::IgnoreAttributesAndSetLocalProperty(
   }
 
   // Check for accessor in prototype chain removed here in clone.
-  if (result->IsNotFound()) {
+  if (!result.IsFound()) {
+    // Neither properties nor transitions found.
     return AddProperty(name, value, attributes);
   }
-  if (!result->IsLoaded()) {
-    return SetLazyProperty(result, name, value, attributes);
-  }
+
+  PropertyDetails details = PropertyDetails(attributes, NORMAL);
+
   // Check of IsReadOnly removed from here in clone.
-  switch (result->type()) {
+  switch (result.type()) {
     case NORMAL:
-      return SetNormalizedProperty(result, value);
+      return SetNormalizedProperty(name, value, details);
     case FIELD:
-      return FastPropertyAtPut(result->GetFieldIndex(), value);
+      return FastPropertyAtPut(result.GetFieldIndex(), value);
     case MAP_TRANSITION:
-      if (attributes == result->GetAttributes()) {
+      if (attributes == result.GetAttributes()) {
         // Only use map transition if the attributes match.
-        return AddFastPropertyUsingMap(result->GetTransitionMap(),
+        return AddFastPropertyUsingMap(result.GetTransitionMap(),
                                        name,
                                        value);
       }
       return ConvertDescriptorToField(name, value, attributes);
     case CONSTANT_FUNCTION:
       // Only replace the function if necessary.
-      if (value == result->GetConstantFunction()) return value;
+      if (value == result.GetConstantFunction()) return value;
       // Preserve the attributes of this existing property.
-      attributes = result->GetAttributes();
+      attributes = result.GetAttributes();
       return ConvertDescriptorToField(name, value, attributes);
     case CALLBACKS:
     case INTERCEPTOR:
@@ -2099,7 +2037,7 @@ PropertyAttributes JSObject::GetPropertyAttributeWithInterceptor(
       VMState state(EXTERNAL);
       result = getter(v8::Utils::ToLocal(name_handle), info);
     }
-    if (!result.IsEmpty()) return NONE;
+    if (!result.IsEmpty()) return DONT_ENUM;
   }
   return holder_handle->GetPropertyAttributePostInterceptor(*receiver_handle,
                                                             *name_handle,
@@ -2134,7 +2072,7 @@ PropertyAttributes JSObject::GetPropertyAttribute(JSObject* receiver,
                                                      name,
                                                      continue_search);
   }
-  if (result->IsValid()) {
+  if (result->IsProperty()) {
     switch (result->type()) {
       case NORMAL:  // fall through
       case FIELD:
@@ -2144,13 +2082,8 @@ PropertyAttributes JSObject::GetPropertyAttribute(JSObject* receiver,
       case INTERCEPTOR:
         return result->holder()->
           GetPropertyAttributeWithInterceptor(receiver, name, continue_search);
-      case MAP_TRANSITION:
-      case CONSTANT_TRANSITION:
-      case NULL_DESCRIPTOR:
-        return ABSENT;
       default:
         UNREACHABLE();
-        break;
     }
   }
   return ABSENT;
@@ -2186,7 +2119,7 @@ Object* JSObject::NormalizeProperties(PropertyNormalizationMode mode,
     property_count += 2;  // Make space for two more properties.
   }
   Object* obj =
-      StringDictionary::Allocate(property_count * 2);
+      StringDictionary::Allocate(property_count);
   if (obj->IsFailure()) return obj;
   StringDictionary* dictionary = StringDictionary::cast(obj);
 
@@ -2323,7 +2256,7 @@ Object* JSObject::DeletePropertyPostInterceptor(String* name, DeleteMode mode) {
   // Check local property, ignore interceptor.
   LookupResult result;
   LocalLookupRealNamedProperty(name, &result);
-  if (!result.IsValid()) return Heap::true_value();
+  if (!result.IsProperty()) return Heap::true_value();
 
   // Normalize object if needed.
   Object* obj = NormalizeProperties(CLEAR_INOBJECT_PROPERTIES, 0);
@@ -2507,7 +2440,7 @@ Object* JSObject::DeleteProperty(String* name, DeleteMode mode) {
   } else {
     LookupResult result;
     LocalLookup(name, &result);
-    if (!result.IsValid()) return Heap::true_value();
+    if (!result.IsProperty()) return Heap::true_value();
     // Ignore attributes if forcing a deletion.
     if (result.IsDontDelete() && mode != FORCE_DELETION) {
       return Heap::false_value();
@@ -2519,11 +2452,6 @@ Object* JSObject::DeleteProperty(String* name, DeleteMode mode) {
         return DeletePropertyPostInterceptor(name, mode);
       }
       return DeletePropertyWithInterceptor(name);
-    }
-    if (!result.IsLoaded()) {
-      return JSObject::cast(this)->DeleteLazyProperty(&result,
-                                                      name,
-                                                      mode);
     }
     // Normalize object if needed.
     Object* obj = NormalizeProperties(CLEAR_INOBJECT_PROPERTIES, 0);
@@ -2591,9 +2519,8 @@ bool JSObject::ReferencesObject(Object* obj) {
       break;
   }
 
-  // For functions check the context. Boilerplate functions do
-  // not have to be traversed since they have no real context.
-  if (IsJSFunction() && !JSFunction::cast(this)->IsBoilerplate()) {
+  // For functions check the context.
+  if (IsJSFunction()) {
     // Get the constructor function for arguments array.
     JSObject* arguments_boilerplate =
         Top::context()->global_context()->arguments_boilerplate();
@@ -2742,7 +2669,7 @@ void JSObject::Lookup(String* name, LookupResult* result) {
        current != Heap::null_value();
        current = JSObject::cast(current)->GetPrototype()) {
     JSObject::cast(current)->LocalLookup(name, result);
-    if (result->IsValid() && !result->IsTransitionType()) return;
+    if (result->IsProperty()) return;
   }
   result->NotFound();
 }
@@ -2754,7 +2681,7 @@ void JSObject::LookupCallback(String* name, LookupResult* result) {
        current != Heap::null_value();
        current = JSObject::cast(current)->GetPrototype()) {
     JSObject::cast(current)->LocalLookupRealNamedProperty(name, result);
-    if (result->IsValid() && result->type() == CALLBACKS) return;
+    if (result->IsProperty() && result->type() == CALLBACKS) return;
   }
   result->NotFound();
 }
@@ -2766,30 +2693,11 @@ Object* JSObject::DefineGetterSetter(String* name,
   // interceptor calls.
   AssertNoContextChange ncc;
 
-  // Check access rights if needed.
-  if (IsAccessCheckNeeded() &&
-      !Top::MayNamedAccess(this, name, v8::ACCESS_SET)) {
-    Top::ReportFailedAccessCheck(this, v8::ACCESS_SET);
-    return Heap::undefined_value();
-  }
-
   // Try to flatten before operating on the string.
-  name->TryFlattenIfNotFlat();
+  name->TryFlatten();
 
-  // Check if there is an API defined callback object which prohibits
-  // callback overwriting in this object or it's prototype chain.
-  // This mechanism is needed for instance in a browser setting, where
-  // certain accessors such as window.location should not be allowed
-  // to be overwritten because allowing overwriting could potentially
-  // cause security problems.
-  LookupResult callback_result;
-  LookupCallback(name, &callback_result);
-  if (callback_result.IsValid()) {
-    Object* obj = callback_result.GetCallbackObject();
-    if (obj->IsAccessorInfo() &&
-        AccessorInfo::cast(obj)->prohibits_overwriting()) {
-      return Heap::undefined_value();
-    }
+  if (!CanSetCallback(name)) {
+    return Heap::undefined_value();
   }
 
   uint32_t index;
@@ -2820,9 +2728,10 @@ Object* JSObject::DefineGetterSetter(String* name,
           PropertyDetails details = dictionary->DetailsAt(entry);
           if (details.IsReadOnly()) return Heap::undefined_value();
           if (details.type() == CALLBACKS) {
-            // Only accessors allowed as elements.
-            ASSERT(result->IsFixedArray());
-            return result;
+            if (result->IsFixedArray()) {
+              return result;
+            }
+            // Otherwise allow to override it.
           }
         }
         break;
@@ -2835,14 +2744,14 @@ Object* JSObject::DefineGetterSetter(String* name,
     // Lookup the name.
     LookupResult result;
     LocalLookup(name, &result);
-    if (result.IsValid()) {
+    if (result.IsProperty()) {
       if (result.IsReadOnly()) return Heap::undefined_value();
       if (result.type() == CALLBACKS) {
         Object* obj = result.GetCallbackObject();
+        // Need to preserve old getters/setters.
         if (obj->IsFixedArray()) {
-          PropertyDetails details = PropertyDetails(attributes, CALLBACKS);
-          SetNormalizedProperty(name, obj, details);
-          return obj;
+          // Use set to update attributes.
+          return SetPropertyCallback(name, obj, attributes);
         }
       }
     }
@@ -2851,50 +2760,100 @@ Object* JSObject::DefineGetterSetter(String* name,
   // Allocate the fixed array to hold getter and setter.
   Object* structure = Heap::AllocateFixedArray(2, TENURED);
   if (structure->IsFailure()) return structure;
-  PropertyDetails details = PropertyDetails(attributes, CALLBACKS);
 
   if (is_element) {
-    // Normalize object to make this operation simple.
-    Object* ok = NormalizeElements();
-    if (ok->IsFailure()) return ok;
-
-    // Update the dictionary with the new CALLBACKS property.
-    Object* dict =
-        element_dictionary()->Set(index, structure, details);
-    if (dict->IsFailure()) return dict;
-
-    // If name is an index we need to stay in slow case.
-    NumberDictionary* elements = NumberDictionary::cast(dict);
-    elements->set_requires_slow_elements();
-    // Set the potential new dictionary on the object.
-    set_elements(NumberDictionary::cast(dict));
+    return SetElementCallback(index, structure, attributes);
   } else {
-    // Normalize object to make this operation simple.
-    Object* ok = NormalizeProperties(CLEAR_INOBJECT_PROPERTIES, 0);
-    if (ok->IsFailure()) return ok;
-
-    // For the global object allocate a new map to invalidate the global inline
-    // caches which have a global property cell reference directly in the code.
-    if (IsGlobalObject()) {
-      Object* new_map = map()->CopyDropDescriptors();
-      if (new_map->IsFailure()) return new_map;
-      set_map(Map::cast(new_map));
-    }
-
-    // Update the dictionary with the new CALLBACKS property.
-    return SetNormalizedProperty(name, structure, details);
+    return SetPropertyCallback(name, structure, attributes);
   }
+}
+
+
+bool JSObject::CanSetCallback(String* name) {
+  ASSERT(!IsAccessCheckNeeded()
+         || Top::MayNamedAccess(this, name, v8::ACCESS_SET));
+
+  // Check if there is an API defined callback object which prohibits
+  // callback overwriting in this object or it's prototype chain.
+  // This mechanism is needed for instance in a browser setting, where
+  // certain accessors such as window.location should not be allowed
+  // to be overwritten because allowing overwriting could potentially
+  // cause security problems.
+  LookupResult callback_result;
+  LookupCallback(name, &callback_result);
+  if (callback_result.IsProperty()) {
+    Object* obj = callback_result.GetCallbackObject();
+    if (obj->IsAccessorInfo() &&
+        AccessorInfo::cast(obj)->prohibits_overwriting()) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+
+Object* JSObject::SetElementCallback(uint32_t index,
+                                     Object* structure,
+                                     PropertyAttributes attributes) {
+  PropertyDetails details = PropertyDetails(attributes, CALLBACKS);
+
+  // Normalize elements to make this operation simple.
+  Object* ok = NormalizeElements();
+  if (ok->IsFailure()) return ok;
+
+  // Update the dictionary with the new CALLBACKS property.
+  Object* dict =
+      element_dictionary()->Set(index, structure, details);
+  if (dict->IsFailure()) return dict;
+
+  NumberDictionary* elements = NumberDictionary::cast(dict);
+  elements->set_requires_slow_elements();
+  // Set the potential new dictionary on the object.
+  set_elements(elements);
 
   return structure;
 }
 
 
+Object* JSObject::SetPropertyCallback(String* name,
+                                      Object* structure,
+                                      PropertyAttributes attributes) {
+  PropertyDetails details = PropertyDetails(attributes, CALLBACKS);
+
+  bool convert_back_to_fast = HasFastProperties() &&
+      (map()->instance_descriptors()->number_of_descriptors()
+          < DescriptorArray::kMaxNumberOfDescriptors);
+
+  // Normalize object to make this operation simple.
+  Object* ok = NormalizeProperties(CLEAR_INOBJECT_PROPERTIES, 0);
+  if (ok->IsFailure()) return ok;
+
+  // For the global object allocate a new map to invalidate the global inline
+  // caches which have a global property cell reference directly in the code.
+  if (IsGlobalObject()) {
+    Object* new_map = map()->CopyDropDescriptors();
+    if (new_map->IsFailure()) return new_map;
+    set_map(Map::cast(new_map));
+  }
+
+  // Update the dictionary with the new CALLBACKS property.
+  Object* result = SetNormalizedProperty(name, structure, details);
+  if (result->IsFailure()) return result;
+
+  if (convert_back_to_fast) {
+    ok = TransformToFastProperties(0);
+    if (ok->IsFailure()) return ok;
+  }
+  return result;
+}
+
 Object* JSObject::DefineAccessor(String* name, bool is_getter, JSFunction* fun,
                                  PropertyAttributes attributes) {
   // Check access rights if needed.
   if (IsAccessCheckNeeded() &&
-      !Top::MayNamedAccess(this, name, v8::ACCESS_HAS)) {
-    Top::ReportFailedAccessCheck(this, v8::ACCESS_HAS);
+      !Top::MayNamedAccess(this, name, v8::ACCESS_SET)) {
+    Top::ReportFailedAccessCheck(this, v8::ACCESS_SET);
     return Heap::undefined_value();
   }
 
@@ -2909,6 +2868,78 @@ Object* JSObject::DefineAccessor(String* name, bool is_getter, JSFunction* fun,
   Object* array = DefineGetterSetter(name, attributes);
   if (array->IsFailure() || array->IsUndefined()) return array;
   FixedArray::cast(array)->set(is_getter ? 0 : 1, fun);
+  return this;
+}
+
+
+Object* JSObject::DefineAccessor(AccessorInfo* info) {
+  String* name = String::cast(info->name());
+  // Check access rights if needed.
+  if (IsAccessCheckNeeded() &&
+      !Top::MayNamedAccess(this, name, v8::ACCESS_SET)) {
+    Top::ReportFailedAccessCheck(this, v8::ACCESS_SET);
+    return Heap::undefined_value();
+  }
+
+  if (IsJSGlobalProxy()) {
+    Object* proto = GetPrototype();
+    if (proto->IsNull()) return this;
+    ASSERT(proto->IsJSGlobalObject());
+    return JSObject::cast(proto)->DefineAccessor(info);
+  }
+
+  // Make sure that the top context does not change when doing callbacks or
+  // interceptor calls.
+  AssertNoContextChange ncc;
+
+  // Try to flatten before operating on the string.
+  name->TryFlatten();
+
+  if (!CanSetCallback(name)) {
+    return Heap::undefined_value();
+  }
+
+  uint32_t index = 0;
+  bool is_element = name->AsArrayIndex(&index);
+
+  if (is_element) {
+    if (IsJSArray()) return Heap::undefined_value();
+
+    // Accessors overwrite previous callbacks (cf. with getters/setters).
+    switch (GetElementsKind()) {
+      case FAST_ELEMENTS:
+        break;
+      case PIXEL_ELEMENTS:
+      case EXTERNAL_BYTE_ELEMENTS:
+      case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+      case EXTERNAL_SHORT_ELEMENTS:
+      case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+      case EXTERNAL_INT_ELEMENTS:
+      case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+      case EXTERNAL_FLOAT_ELEMENTS:
+        // Ignore getters and setters on pixel and external array
+        // elements.
+        return Heap::undefined_value();
+      case DICTIONARY_ELEMENTS:
+        break;
+      default:
+        UNREACHABLE();
+        break;
+    }
+
+    SetElementCallback(index, info, info->property_attributes());
+  } else {
+    // Lookup the name.
+    LookupResult result;
+    LocalLookup(name, &result);
+    // ES5 forbids turning a property into an accessor if it's not
+    // configurable (that is IsDontDelete in ES3 and v8), see 8.6.1 (Table 5).
+    if (result.IsProperty() && (result.IsReadOnly() || result.IsDontDelete())) {
+      return Heap::undefined_value();
+    }
+    SetPropertyCallback(name, info, info->property_attributes());
+  }
+
   return this;
 }
 
@@ -2940,8 +2971,9 @@ Object* JSObject::LookupAccessor(String* name, bool is_getter) {
           Object* element = dictionary->ValueAt(entry);
           PropertyDetails details = dictionary->DetailsAt(entry);
           if (details.type() == CALLBACKS) {
-            // Only accessors allowed as elements.
-            return FixedArray::cast(element)->get(accessor_index);
+            if (element->IsFixedArray()) {
+              return FixedArray::cast(element)->get(accessor_index);
+            }
           }
         }
       }
@@ -2952,7 +2984,7 @@ Object* JSObject::LookupAccessor(String* name, bool is_getter) {
          obj = JSObject::cast(obj)->GetPrototype()) {
       LookupResult result;
       JSObject::cast(obj)->LocalLookup(name, &result);
-      if (result.IsValid()) {
+      if (result.IsProperty()) {
         if (result.IsReadOnly()) return Heap::undefined_value();
         if (result.type() == CALLBACKS) {
           Object* obj = result.GetCallbackObject();
@@ -3034,19 +3066,79 @@ Object* Map::CopyDropTransitions() {
 
 
 Object* Map::UpdateCodeCache(String* name, Code* code) {
-  ASSERT(code->ic_state() == MONOMORPHIC);
-  FixedArray* cache = code_cache();
+  // Allocate the code cache if not present.
+  if (code_cache()->IsFixedArray()) {
+    Object* result = Heap::AllocateCodeCache();
+    if (result->IsFailure()) return result;
+    set_code_cache(result);
+  }
 
-  // When updating the code cache we disregard the type encoded in the
+  // Update the code cache.
+  return CodeCache::cast(code_cache())->Update(name, code);
+}
+
+
+Object* Map::FindInCodeCache(String* name, Code::Flags flags) {
+  // Do a lookup if a code cache exists.
+  if (!code_cache()->IsFixedArray()) {
+    return CodeCache::cast(code_cache())->Lookup(name, flags);
+  } else {
+    return Heap::undefined_value();
+  }
+}
+
+
+int Map::IndexInCodeCache(Object* name, Code* code) {
+  // Get the internal index if a code cache exists.
+  if (!code_cache()->IsFixedArray()) {
+    return CodeCache::cast(code_cache())->GetIndex(name, code);
+  }
+  return -1;
+}
+
+
+void Map::RemoveFromCodeCache(String* name, Code* code, int index) {
+  // No GC is supposed to happen between a call to IndexInCodeCache and
+  // RemoveFromCodeCache so the code cache must be there.
+  ASSERT(!code_cache()->IsFixedArray());
+  CodeCache::cast(code_cache())->RemoveByIndex(name, code, index);
+}
+
+
+Object* CodeCache::Update(String* name, Code* code) {
+  ASSERT(code->ic_state() == MONOMORPHIC);
+
+  // The number of monomorphic stubs for normal load/store/call IC's can grow to
+  // a large number and therefore they need to go into a hash table. They are
+  // used to load global properties from cells.
+  if (code->type() == NORMAL) {
+    // Make sure that a hash table is allocated for the normal load code cache.
+    if (normal_type_cache()->IsUndefined()) {
+      Object* result =
+          CodeCacheHashTable::Allocate(CodeCacheHashTable::kInitialSize);
+      if (result->IsFailure()) return result;
+      set_normal_type_cache(result);
+    }
+    return UpdateNormalTypeCache(name, code);
+  } else {
+    ASSERT(default_cache()->IsFixedArray());
+    return UpdateDefaultCache(name, code);
+  }
+}
+
+
+Object* CodeCache::UpdateDefaultCache(String* name, Code* code) {
+  // When updating the default code cache we disregard the type encoded in the
   // flags. This allows call constant stubs to overwrite call field
   // stubs, etc.
   Code::Flags flags = Code::RemoveTypeFromFlags(code->flags());
 
   // First check whether we can update existing code cache without
   // extending it.
+  FixedArray* cache = default_cache();
   int length = cache->length();
   int deleted_index = -1;
-  for (int i = 0; i < length; i += 2) {
+  for (int i = 0; i < length; i += kCodeCacheEntrySize) {
     Object* key = cache->get(i);
     if (key->IsNull()) {
       if (deleted_index < 0) deleted_index = i;
@@ -3054,14 +3146,15 @@ Object* Map::UpdateCodeCache(String* name, Code* code) {
     }
     if (key->IsUndefined()) {
       if (deleted_index >= 0) i = deleted_index;
-      cache->set(i + 0, name);
-      cache->set(i + 1, code);
+      cache->set(i + kCodeCacheEntryNameOffset, name);
+      cache->set(i + kCodeCacheEntryCodeOffset, code);
       return this;
     }
     if (name->Equals(String::cast(key))) {
-      Code::Flags found = Code::cast(cache->get(i + 1))->flags();
+      Code::Flags found =
+          Code::cast(cache->get(i + kCodeCacheEntryCodeOffset))->flags();
       if (Code::RemoveTypeFromFlags(found) == flags) {
-        cache->set(i + 1, code);
+        cache->set(i + kCodeCacheEntryCodeOffset, code);
         return this;
       }
     }
@@ -3070,61 +3163,206 @@ Object* Map::UpdateCodeCache(String* name, Code* code) {
   // Reached the end of the code cache.  If there were deleted
   // elements, reuse the space for the first of them.
   if (deleted_index >= 0) {
-    cache->set(deleted_index + 0, name);
-    cache->set(deleted_index + 1, code);
+    cache->set(deleted_index + kCodeCacheEntryNameOffset, name);
+    cache->set(deleted_index + kCodeCacheEntryCodeOffset, code);
     return this;
   }
 
-  // Extend the code cache with some new entries (at least one).
-  int new_length = length + ((length >> 1) & ~1) + 2;
-  ASSERT((new_length & 1) == 0);  // must be a multiple of two
+  // Extend the code cache with some new entries (at least one). Must be a
+  // multiple of the entry size.
+  int new_length = length + ((length >> 1)) + kCodeCacheEntrySize;
+  new_length = new_length - new_length % kCodeCacheEntrySize;
+  ASSERT((new_length % kCodeCacheEntrySize) == 0);
   Object* result = cache->CopySize(new_length);
   if (result->IsFailure()) return result;
 
   // Add the (name, code) pair to the new cache.
   cache = FixedArray::cast(result);
-  cache->set(length + 0, name);
-  cache->set(length + 1, code);
-  set_code_cache(cache);
+  cache->set(length + kCodeCacheEntryNameOffset, name);
+  cache->set(length + kCodeCacheEntryCodeOffset, code);
+  set_default_cache(cache);
   return this;
 }
 
 
-Object* Map::FindInCodeCache(String* name, Code::Flags flags) {
-  FixedArray* cache = code_cache();
+Object* CodeCache::UpdateNormalTypeCache(String* name, Code* code) {
+  // Adding a new entry can cause a new cache to be allocated.
+  CodeCacheHashTable* cache = CodeCacheHashTable::cast(normal_type_cache());
+  Object* new_cache = cache->Put(name, code);
+  if (new_cache->IsFailure()) return new_cache;
+  set_normal_type_cache(new_cache);
+  return this;
+}
+
+
+Object* CodeCache::Lookup(String* name, Code::Flags flags) {
+  if (Code::ExtractTypeFromFlags(flags) == NORMAL) {
+    return LookupNormalTypeCache(name, flags);
+  } else {
+    return LookupDefaultCache(name, flags);
+  }
+}
+
+
+Object* CodeCache::LookupDefaultCache(String* name, Code::Flags flags) {
+  FixedArray* cache = default_cache();
   int length = cache->length();
-  for (int i = 0; i < length; i += 2) {
-    Object* key = cache->get(i);
+  for (int i = 0; i < length; i += kCodeCacheEntrySize) {
+    Object* key = cache->get(i + kCodeCacheEntryNameOffset);
     // Skip deleted elements.
     if (key->IsNull()) continue;
     if (key->IsUndefined()) return key;
     if (name->Equals(String::cast(key))) {
-      Code* code = Code::cast(cache->get(i + 1));
-      if (code->flags() == flags) return code;
+      Code* code = Code::cast(cache->get(i + kCodeCacheEntryCodeOffset));
+      if (code->flags() == flags) {
+        return code;
+      }
     }
   }
   return Heap::undefined_value();
 }
 
 
-int Map::IndexInCodeCache(Code* code) {
-  FixedArray* array = code_cache();
+Object* CodeCache::LookupNormalTypeCache(String* name, Code::Flags flags) {
+  if (!normal_type_cache()->IsUndefined()) {
+    CodeCacheHashTable* cache = CodeCacheHashTable::cast(normal_type_cache());
+    return cache->Lookup(name, flags);
+  } else {
+    return Heap::undefined_value();
+  }
+}
+
+
+int CodeCache::GetIndex(Object* name, Code* code) {
+  if (code->type() == NORMAL) {
+    if (normal_type_cache()->IsUndefined()) return -1;
+    CodeCacheHashTable* cache = CodeCacheHashTable::cast(normal_type_cache());
+    return cache->GetIndex(String::cast(name), code->flags());
+  }
+
+  FixedArray* array = default_cache();
   int len = array->length();
-  for (int i = 0; i < len; i += 2) {
-    if (array->get(i + 1) == code) return i + 1;
+  for (int i = 0; i < len; i += kCodeCacheEntrySize) {
+    if (array->get(i + kCodeCacheEntryCodeOffset) == code) return i + 1;
   }
   return -1;
 }
 
 
-void Map::RemoveFromCodeCache(int index) {
-  FixedArray* array = code_cache();
-  ASSERT(array->length() >= index && array->get(index)->IsCode());
-  // Use null instead of undefined for deleted elements to distinguish
-  // deleted elements from unused elements.  This distinction is used
-  // when looking up in the cache and when updating the cache.
-  array->set_null(index - 1);  // key
-  array->set_null(index);  // code
+void CodeCache::RemoveByIndex(Object* name, Code* code, int index) {
+  if (code->type() == NORMAL) {
+    ASSERT(!normal_type_cache()->IsUndefined());
+    CodeCacheHashTable* cache = CodeCacheHashTable::cast(normal_type_cache());
+    ASSERT(cache->GetIndex(String::cast(name), code->flags()) == index);
+    cache->RemoveByIndex(index);
+  } else {
+    FixedArray* array = default_cache();
+    ASSERT(array->length() >= index && array->get(index)->IsCode());
+    // Use null instead of undefined for deleted elements to distinguish
+    // deleted elements from unused elements.  This distinction is used
+    // when looking up in the cache and when updating the cache.
+    ASSERT_EQ(1, kCodeCacheEntryCodeOffset - kCodeCacheEntryNameOffset);
+    array->set_null(index - 1);  // Name.
+    array->set_null(index);  // Code.
+  }
+}
+
+
+// The key in the code cache hash table consists of the property name and the
+// code object. The actual match is on the name and the code flags. If a key
+// is created using the flags and not a code object it can only be used for
+// lookup not to create a new entry.
+class CodeCacheHashTableKey : public HashTableKey {
+ public:
+  CodeCacheHashTableKey(String* name, Code::Flags flags)
+      : name_(name), flags_(flags), code_(NULL) { }
+
+  CodeCacheHashTableKey(String* name, Code* code)
+      : name_(name),
+        flags_(code->flags()),
+        code_(code) { }
+
+
+  bool IsMatch(Object* other) {
+    if (!other->IsFixedArray()) return false;
+    FixedArray* pair = FixedArray::cast(other);
+    String* name = String::cast(pair->get(0));
+    Code::Flags flags = Code::cast(pair->get(1))->flags();
+    if (flags != flags_) {
+      return false;
+    }
+    return name_->Equals(name);
+  }
+
+  static uint32_t NameFlagsHashHelper(String* name, Code::Flags flags) {
+    return name->Hash() ^ flags;
+  }
+
+  uint32_t Hash() { return NameFlagsHashHelper(name_, flags_); }
+
+  uint32_t HashForObject(Object* obj) {
+    FixedArray* pair = FixedArray::cast(obj);
+    String* name = String::cast(pair->get(0));
+    Code* code = Code::cast(pair->get(1));
+    return NameFlagsHashHelper(name, code->flags());
+  }
+
+  Object* AsObject() {
+    ASSERT(code_ != NULL);
+    Object* obj = Heap::AllocateFixedArray(2);
+    if (obj->IsFailure()) return obj;
+    FixedArray* pair = FixedArray::cast(obj);
+    pair->set(0, name_);
+    pair->set(1, code_);
+    return pair;
+  }
+
+ private:
+  String* name_;
+  Code::Flags flags_;
+  Code* code_;
+};
+
+
+Object* CodeCacheHashTable::Lookup(String* name, Code::Flags flags) {
+  CodeCacheHashTableKey key(name, flags);
+  int entry = FindEntry(&key);
+  if (entry == kNotFound) return Heap::undefined_value();
+  return get(EntryToIndex(entry) + 1);
+}
+
+
+Object* CodeCacheHashTable::Put(String* name, Code* code) {
+  CodeCacheHashTableKey key(name, code);
+  Object* obj = EnsureCapacity(1, &key);
+  if (obj->IsFailure()) return obj;
+
+  // Don't use this, as the table might have grown.
+  CodeCacheHashTable* cache = reinterpret_cast<CodeCacheHashTable*>(obj);
+
+  int entry = cache->FindInsertionEntry(key.Hash());
+  Object* k = key.AsObject();
+  if (k->IsFailure()) return k;
+
+  cache->set(EntryToIndex(entry), k);
+  cache->set(EntryToIndex(entry) + 1, code);
+  cache->ElementAdded();
+  return cache;
+}
+
+
+int CodeCacheHashTable::GetIndex(String* name, Code::Flags flags) {
+  CodeCacheHashTableKey key(name, flags);
+  int entry = FindEntry(&key);
+  return (entry == kNotFound) ? -1 : entry;
+}
+
+
+void CodeCacheHashTable::RemoveByIndex(int index) {
+  ASSERT(index >= 0);
+  set(EntryToIndex(index), Heap::null_value());
+  set(EntryToIndex(index) + 1, Heap::null_value());
+  ElementRemoved();
 }
 
 
@@ -3431,18 +3669,25 @@ void DescriptorArray::Sort() {
   int len = number_of_descriptors();
 
   // Bottom-up max-heap construction.
-  for (int i = 1; i < len; ++i) {
-    int child_index = i;
-    while (child_index > 0) {
-      int parent_index = ((child_index + 1) >> 1) - 1;
-      uint32_t parent_hash = GetKey(parent_index)->Hash();
+  // Index of the last node with children
+  const int max_parent_index = (len / 2) - 1;
+  for (int i = max_parent_index; i >= 0; --i) {
+    int parent_index = i;
+    const uint32_t parent_hash = GetKey(i)->Hash();
+    while (parent_index <= max_parent_index) {
+      int child_index = 2 * parent_index + 1;
       uint32_t child_hash = GetKey(child_index)->Hash();
-      if (parent_hash < child_hash) {
-        Swap(parent_index, child_index);
-      } else {
-        break;
+      if (child_index + 1 < len) {
+        uint32_t right_child_hash = GetKey(child_index + 1)->Hash();
+        if (right_child_hash > child_hash) {
+          child_index++;
+          child_hash = right_child_hash;
+        }
       }
-      child_index = parent_index;
+      if (child_hash <= parent_hash) break;
+      Swap(parent_index, child_index);
+      // Now element at child_index could be < its children.
+      parent_index = child_index;  // parent_hash remains correct.
     }
   }
 
@@ -3452,21 +3697,21 @@ void DescriptorArray::Sort() {
     Swap(0, i);
     // Sift down the new top element.
     int parent_index = 0;
-    while (true) {
-      int child_index = ((parent_index + 1) << 1) - 1;
-      if (child_index >= i) break;
-      uint32_t child1_hash = GetKey(child_index)->Hash();
-      uint32_t child2_hash = GetKey(child_index + 1)->Hash();
-      uint32_t parent_hash = GetKey(parent_index)->Hash();
-      if (child_index + 1 >= i || child1_hash > child2_hash) {
-        if (parent_hash > child1_hash) break;
-        Swap(parent_index, child_index);
-        parent_index = child_index;
-      } else {
-        if (parent_hash > child2_hash) break;
-        Swap(parent_index, child_index + 1);
-        parent_index = child_index + 1;
+    const uint32_t parent_hash = GetKey(parent_index)->Hash();
+    const int max_parent_index = (i / 2) - 1;
+    while (parent_index <= max_parent_index) {
+      int child_index = parent_index * 2 + 1;
+      uint32_t child_hash = GetKey(child_index)->Hash();
+      if (child_index + 1 < i) {
+        uint32_t right_child_hash = GetKey(child_index + 1)->Hash();
+        if (right_child_hash > child_hash) {
+          child_index++;
+          child_hash = right_child_hash;
+        }
       }
+      if (child_hash <= parent_hash) break;
+      Swap(parent_index, child_index);
+      parent_index = child_index;
     }
   }
 
@@ -3547,7 +3792,7 @@ int String::Utf8Length() {
   // doesn't make Utf8Length faster, but it is very likely that
   // the string will be accessed later (for example by WriteUtf8)
   // so it's still a good idea.
-  TryFlattenIfNotFlat();
+  TryFlatten();
   Access<StringInputBuffer> buffer(&string_input_buffer);
   buffer->Reset(0, this);
   int result = 0;
@@ -4436,51 +4681,58 @@ bool String::SlowEquals(String* other) {
     if (Hash() != other->Hash()) return false;
   }
 
-  if (StringShape(this).IsSequentialAscii() &&
-      StringShape(other).IsSequentialAscii()) {
-    const char* str1 = SeqAsciiString::cast(this)->GetChars();
-    const char* str2 = SeqAsciiString::cast(other)->GetChars();
+  // We know the strings are both non-empty. Compare the first chars
+  // before we try to flatten the strings.
+  if (this->Get(0) != other->Get(0)) return false;
+
+  String* lhs = this->TryFlattenGetString();
+  String* rhs = other->TryFlattenGetString();
+
+  if (StringShape(lhs).IsSequentialAscii() &&
+      StringShape(rhs).IsSequentialAscii()) {
+    const char* str1 = SeqAsciiString::cast(lhs)->GetChars();
+    const char* str2 = SeqAsciiString::cast(rhs)->GetChars();
     return CompareRawStringContents(Vector<const char>(str1, len),
                                     Vector<const char>(str2, len));
   }
 
-  if (this->IsFlat()) {
+  if (lhs->IsFlat()) {
     if (IsAsciiRepresentation()) {
-      Vector<const char> vec1 = this->ToAsciiVector();
-      if (other->IsFlat()) {
-        if (other->IsAsciiRepresentation()) {
-          Vector<const char> vec2 = other->ToAsciiVector();
+      Vector<const char> vec1 = lhs->ToAsciiVector();
+      if (rhs->IsFlat()) {
+        if (rhs->IsAsciiRepresentation()) {
+          Vector<const char> vec2 = rhs->ToAsciiVector();
           return CompareRawStringContents(vec1, vec2);
         } else {
           VectorIterator<char> buf1(vec1);
-          VectorIterator<uc16> ib(other->ToUC16Vector());
+          VectorIterator<uc16> ib(rhs->ToUC16Vector());
           return CompareStringContents(&buf1, &ib);
         }
       } else {
         VectorIterator<char> buf1(vec1);
-        string_compare_buffer_b.Reset(0, other);
+        string_compare_buffer_b.Reset(0, rhs);
         return CompareStringContents(&buf1, &string_compare_buffer_b);
       }
     } else {
-      Vector<const uc16> vec1 = this->ToUC16Vector();
-      if (other->IsFlat()) {
-        if (other->IsAsciiRepresentation()) {
+      Vector<const uc16> vec1 = lhs->ToUC16Vector();
+      if (rhs->IsFlat()) {
+        if (rhs->IsAsciiRepresentation()) {
           VectorIterator<uc16> buf1(vec1);
-          VectorIterator<char> ib(other->ToAsciiVector());
+          VectorIterator<char> ib(rhs->ToAsciiVector());
           return CompareStringContents(&buf1, &ib);
         } else {
-          Vector<const uc16> vec2(other->ToUC16Vector());
+          Vector<const uc16> vec2(rhs->ToUC16Vector());
           return CompareRawStringContents(vec1, vec2);
         }
       } else {
         VectorIterator<uc16> buf1(vec1);
-        string_compare_buffer_b.Reset(0, other);
+        string_compare_buffer_b.Reset(0, rhs);
         return CompareStringContents(&buf1, &string_compare_buffer_b);
       }
     }
   } else {
-    string_compare_buffer_a.Reset(0, this);
-    return CompareStringContentsPartial(&string_compare_buffer_a, other);
+    string_compare_buffer_a.Reset(0, lhs);
+    return CompareStringContentsPartial(&string_compare_buffer_a, rhs);
   }
 }
 
@@ -4514,19 +4766,44 @@ bool String::IsEqualTo(Vector<const char> str) {
 }
 
 
+template <typename schar>
+static inline uint32_t HashSequentialString(const schar* chars, int length) {
+  StringHasher hasher(length);
+  if (!hasher.has_trivial_hash()) {
+    int i;
+    for (i = 0; hasher.is_array_index() && (i < length); i++) {
+      hasher.AddCharacter(chars[i]);
+    }
+    for (; i < length; i++) {
+      hasher.AddCharacterNoIndex(chars[i]);
+    }
+  }
+  return hasher.GetHashField();
+}
+
+
 uint32_t String::ComputeAndSetHash() {
   // Should only be called if hash code has not yet been computed.
-  ASSERT(!(hash_field() & kHashComputedMask));
+  ASSERT(!HasHashCode());
+
+  const int len = length();
 
   // Compute the hash code.
-  StringInputBuffer buffer(this);
-  uint32_t field = ComputeHashField(&buffer, length());
+  uint32_t field = 0;
+  if (StringShape(this).IsSequentialAscii()) {
+    field = HashSequentialString(SeqAsciiString::cast(this)->GetChars(), len);
+  } else if (StringShape(this).IsSequentialTwoByte()) {
+    field = HashSequentialString(SeqTwoByteString::cast(this)->GetChars(), len);
+  } else {
+    StringInputBuffer buffer(this);
+    field = ComputeHashField(&buffer, len);
+  }
 
   // Store the hash code in the object.
   set_hash_field(field);
 
   // Check the hash code is there.
-  ASSERT(hash_field() & kHashComputedMask);
+  ASSERT(HasHashCode());
   uint32_t result = field >> kHashShift;
   ASSERT(result != 0);  // Ensure that the hash value of 0 is never computed.
   return result;
@@ -4581,8 +4858,7 @@ bool String::SlowAsArrayIndex(uint32_t* index) {
 static inline uint32_t HashField(uint32_t hash,
                                  bool is_array_index,
                                  int length = -1) {
-  uint32_t result =
-      (hash << String::kHashShift) | String::kHashComputedMask;
+  uint32_t result = (hash << String::kHashShift);
   if (is_array_index) {
     // For array indexes mix the length into the hash as an array index could
     // be zero.
@@ -4638,9 +4914,9 @@ uint32_t String::ComputeHashField(unibrow::CharacterStream* buffer,
 }
 
 
-Object* String::SubString(int start, int end) {
+Object* String::SubString(int start, int end, PretenureFlag pretenure) {
   if (start == 0 && end == length()) return this;
-  Object* result = Heap::AllocateSubString(this, start, end);
+  Object* result = Heap::AllocateSubString(this, start, end, pretenure);
   return result;
 }
 
@@ -4731,12 +5007,14 @@ Object* JSFunction::SetInstancePrototype(Object* value) {
     // prototype is put into the initial map where it belongs.
     set_prototype_or_initial_map(value);
   }
+  Heap::ClearInstanceofCache();
   return value;
 }
 
 
 
 Object* JSFunction::SetPrototype(Object* value) {
+  ASSERT(should_have_prototype());
   Object* construct_prototype = value;
 
   // If the value is not a JSObject, store the value in the map's
@@ -4759,6 +5037,14 @@ Object* JSFunction::SetPrototype(Object* value) {
   }
 
   return SetInstancePrototype(construct_prototype);
+}
+
+
+Object* JSFunction::RemovePrototype() {
+  ASSERT(map() == context()->global_context()->function_map());
+  set_map(context()->global_context()->function_without_prototype_map());
+  set_prototype_or_initial_map(Heap::the_hole_value());
+  return this;
 }
 
 
@@ -4820,6 +5106,40 @@ int SharedFunctionInfo::CalculateInObjectProperties() {
 }
 
 
+bool SharedFunctionInfo::CanGenerateInlineConstructor(Object* prototype) {
+  // Check the basic conditions for generating inline constructor code.
+  if (!FLAG_inline_new
+      || !has_only_simple_this_property_assignments()
+      || this_property_assignments_count() == 0) {
+    return false;
+  }
+
+  // If the prototype is null inline constructors cause no problems.
+  if (!prototype->IsJSObject()) {
+    ASSERT(prototype->IsNull());
+    return true;
+  }
+
+  // Traverse the proposed prototype chain looking for setters for properties of
+  // the same names as are set by the inline constructor.
+  for (Object* obj = prototype;
+       obj != Heap::null_value();
+       obj = obj->GetPrototype()) {
+    JSObject* js_object = JSObject::cast(obj);
+    for (int i = 0; i < this_property_assignments_count(); i++) {
+      LookupResult result;
+      String* name = GetThisPropertyAssignmentName(i);
+      js_object->LocalLookupRealNamedProperty(name, &result);
+      if (result.IsProperty() && result.type() == CALLBACKS) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+
 void SharedFunctionInfo::SetThisPropertyAssignmentsInfo(
     bool only_simple_this_property_assignments,
     FixedArray* assignments) {
@@ -4875,7 +5195,6 @@ Object* SharedFunctionInfo::GetThisPropertyAssignmentConstant(int index) {
 }
 
 
-
 // Support function for printing the source code to a StringStream
 // without any allocation in the heap.
 void SharedFunctionInfo::SourceCodePrint(StringStream* accumulator,
@@ -4919,11 +5238,9 @@ void SharedFunctionInfo::SourceCodePrint(StringStream* accumulator,
 
 
 void SharedFunctionInfo::SharedFunctionInfoIterateBody(ObjectVisitor* v) {
-  IteratePointers(v, kNameOffset, kConstructStubOffset + kPointerSize);
-  IteratePointers(v, kInstanceClassNameOffset, kScriptOffset + kPointerSize);
-  IteratePointers(v, kDebugInfoOffset, kInferredNameOffset + kPointerSize);
-  IteratePointers(v, kThisPropertyAssignmentsOffset,
-      kThisPropertyAssignmentsOffset + kPointerSize);
+  IteratePointers(v,
+                  kNameOffset,
+                  kThisPropertyAssignmentsOffset + kPointerSize);
 }
 
 
@@ -4954,22 +5271,7 @@ void Code::CodeIterateBody(ObjectVisitor* v) {
                   RelocInfo::ModeMask(RelocInfo::RUNTIME_ENTRY);
 
   for (RelocIterator it(this, mode_mask); !it.done(); it.next()) {
-    RelocInfo::Mode rmode = it.rinfo()->rmode();
-    if (rmode == RelocInfo::EMBEDDED_OBJECT) {
-      v->VisitPointer(it.rinfo()->target_object_address());
-    } else if (RelocInfo::IsCodeTarget(rmode)) {
-      v->VisitCodeTarget(it.rinfo());
-    } else if (rmode == RelocInfo::EXTERNAL_REFERENCE) {
-      v->VisitExternalReference(it.rinfo()->target_reference_address());
-#ifdef ENABLE_DEBUGGER_SUPPORT
-    } else if (Debug::has_break_points() &&
-               RelocInfo::IsJSReturn(rmode) &&
-               it.rinfo()->IsPatchedReturnSequence()) {
-      v->VisitDebugTarget(it.rinfo());
-#endif
-    } else if (rmode == RelocInfo::RUNTIME_ENTRY) {
-      v->VisitRuntimeEntry(it.rinfo());
-    }
+    it.rinfo()->Visit(v);
   }
 
   ScopeInfo<>::IterateScopeInfo(this, v);
@@ -5094,6 +5396,7 @@ const char* Code::Kind2String(Kind kind) {
     case STORE_IC: return "STORE_IC";
     case KEYED_STORE_IC: return "KEYED_STORE_IC";
     case CALL_IC: return "CALL_IC";
+    case BINARY_OP_IC: return "BINARY_OP_IC";
   }
   UNREACHABLE();
   return NULL;
@@ -5215,7 +5518,7 @@ Object* JSObject::SetSlowElements(Object* len) {
     case DICTIONARY_ELEMENTS: {
       if (IsJSArray()) {
         uint32_t old_length =
-        static_cast<uint32_t>(JSArray::cast(this)->length()->Number());
+            static_cast<uint32_t>(JSArray::cast(this)->length()->Number());
         element_dictionary()->RemoveNumberEntries(new_length, old_length),
         JSArray::cast(this)->set_length(len);
       }
@@ -5273,7 +5576,7 @@ static Object* ArrayLengthRangeError() {
 
 Object* JSObject::SetElementsLength(Object* len) {
   // We should never end in here with a pixel or external array.
-  ASSERT(!HasPixelElements() && !HasExternalArrayElements());
+  ASSERT(AllowsSetElementsLength());
 
   Object* smi_length = len->ToSmi();
   if (smi_length->IsSmi()) {
@@ -5335,7 +5638,7 @@ Object* JSObject::SetElementsLength(Object* len) {
   // General slow case.
   if (len->IsNumber()) {
     uint32_t length;
-    if (Array::IndexFromObject(len, &length)) {
+    if (len->ToArrayIndex(&length)) {
       return SetSlowElements(len);
     } else {
       return ArrayLengthRangeError();
@@ -5350,6 +5653,50 @@ Object* JSObject::SetElementsLength(Object* len) {
   if (IsJSArray()) JSArray::cast(this)->set_length(Smi::FromInt(1));
   set_elements(FixedArray::cast(obj));
   return this;
+}
+
+
+Object* JSObject::SetPrototype(Object* value,
+                               bool skip_hidden_prototypes) {
+  // Silently ignore the change if value is not a JSObject or null.
+  // SpiderMonkey behaves this way.
+  if (!value->IsJSObject() && !value->IsNull()) return value;
+
+  // Before we can set the prototype we need to be sure
+  // prototype cycles are prevented.
+  // It is sufficient to validate that the receiver is not in the new prototype
+  // chain.
+  for (Object* pt = value; pt != Heap::null_value(); pt = pt->GetPrototype()) {
+    if (JSObject::cast(pt) == this) {
+      // Cycle detected.
+      HandleScope scope;
+      return Top::Throw(*Factory::NewError("cyclic_proto",
+                                           HandleVector<Object>(NULL, 0)));
+    }
+  }
+
+  JSObject* real_receiver = this;
+
+  if (skip_hidden_prototypes) {
+    // Find the first object in the chain whose prototype object is not
+    // hidden and set the new prototype on that object.
+    Object* current_proto = real_receiver->GetPrototype();
+    while (current_proto->IsJSObject() &&
+          JSObject::cast(current_proto)->map()->is_hidden_prototype()) {
+      real_receiver = JSObject::cast(current_proto);
+      current_proto = current_proto->GetPrototype();
+    }
+  }
+
+  // Set the new prototype of the object.
+  Object* new_map = real_receiver->map()->CopyDropTransitions();
+  if (new_map->IsFailure()) return new_map;
+  Map::cast(new_map)->set_prototype(value);
+  real_receiver->set_map(Map::cast(new_map));
+
+  Heap::ClearInstanceofCache();
+
+  return value;
 }
 
 
@@ -5592,6 +5939,108 @@ Object* JSObject::SetElementWithInterceptor(uint32_t index, Object* value) {
 }
 
 
+Object* JSObject::GetElementWithCallback(Object* receiver,
+                                         Object* structure,
+                                         uint32_t index,
+                                         Object* holder) {
+  ASSERT(!structure->IsProxy());
+
+  // api style callbacks.
+  if (structure->IsAccessorInfo()) {
+    AccessorInfo* data = AccessorInfo::cast(structure);
+    Object* fun_obj = data->getter();
+    v8::AccessorGetter call_fun = v8::ToCData<v8::AccessorGetter>(fun_obj);
+    HandleScope scope;
+    Handle<JSObject> self(JSObject::cast(receiver));
+    Handle<JSObject> holder_handle(JSObject::cast(holder));
+    Handle<Object> number = Factory::NewNumberFromUint(index);
+    Handle<String> key(Factory::NumberToString(number));
+    LOG(ApiNamedPropertyAccess("load", *self, *key));
+    CustomArguments args(data->data(), *self, *holder_handle);
+    v8::AccessorInfo info(args.end());
+    v8::Handle<v8::Value> result;
+    {
+      // Leaving JavaScript.
+      VMState state(EXTERNAL);
+      result = call_fun(v8::Utils::ToLocal(key), info);
+    }
+    RETURN_IF_SCHEDULED_EXCEPTION();
+    if (result.IsEmpty()) return Heap::undefined_value();
+    return *v8::Utils::OpenHandle(*result);
+  }
+
+  // __defineGetter__ callback
+  if (structure->IsFixedArray()) {
+    Object* getter = FixedArray::cast(structure)->get(kGetterIndex);
+    if (getter->IsJSFunction()) {
+      return Object::GetPropertyWithDefinedGetter(receiver,
+                                                  JSFunction::cast(getter));
+    }
+    // Getter is not a function.
+    return Heap::undefined_value();
+  }
+
+  UNREACHABLE();
+  return NULL;
+}
+
+
+Object* JSObject::SetElementWithCallback(Object* structure,
+                                         uint32_t index,
+                                         Object* value,
+                                         JSObject* holder) {
+  HandleScope scope;
+
+  // We should never get here to initialize a const with the hole
+  // value since a const declaration would conflict with the setter.
+  ASSERT(!value->IsTheHole());
+  Handle<Object> value_handle(value);
+
+  // To accommodate both the old and the new api we switch on the
+  // data structure used to store the callbacks.  Eventually proxy
+  // callbacks should be phased out.
+  ASSERT(!structure->IsProxy());
+
+  if (structure->IsAccessorInfo()) {
+    // api style callbacks
+    AccessorInfo* data = AccessorInfo::cast(structure);
+    Object* call_obj = data->setter();
+    v8::AccessorSetter call_fun = v8::ToCData<v8::AccessorSetter>(call_obj);
+    if (call_fun == NULL) return value;
+    Handle<Object> number = Factory::NewNumberFromUint(index);
+    Handle<String> key(Factory::NumberToString(number));
+    LOG(ApiNamedPropertyAccess("store", this, *key));
+    CustomArguments args(data->data(), this, JSObject::cast(holder));
+    v8::AccessorInfo info(args.end());
+    {
+      // Leaving JavaScript.
+      VMState state(EXTERNAL);
+      call_fun(v8::Utils::ToLocal(key),
+               v8::Utils::ToLocal(value_handle),
+               info);
+    }
+    RETURN_IF_SCHEDULED_EXCEPTION();
+    return *value_handle;
+  }
+
+  if (structure->IsFixedArray()) {
+    Object* setter = FixedArray::cast(structure)->get(kSetterIndex);
+    if (setter->IsJSFunction()) {
+     return SetPropertyWithDefinedSetter(JSFunction::cast(setter), value);
+    } else {
+      Handle<Object> holder_handle(holder);
+      Handle<Object> key(Factory::NewNumberFromUint(index));
+      Handle<Object> args[2] = { key, holder_handle };
+      return Top::Throw(*Factory::NewTypeError("no_setter_in_callback",
+                                               HandleVector(args, 2)));
+    }
+  }
+
+  UNREACHABLE();
+  return NULL;
+}
+
+
 // Adding n elements in fast case is O(n*n).
 // Note: revisit design to have dual undefined values to capture absent
 // elements.
@@ -5602,9 +6051,8 @@ Object* JSObject::SetFastElement(uint32_t index, Object* value) {
   uint32_t elms_length = static_cast<uint32_t>(elms->length());
 
   if (!IsJSArray() && (index >= elms_length || elms->get(index)->IsTheHole())) {
-    Object* setter = LookupCallbackSetterInPrototypes(index);
-    if (setter->IsJSFunction()) {
-      return SetPropertyWithDefinedSetter(JSFunction::cast(setter), value);
+    if (SetElementWithCallbackSetterInPrototypes(index, value)) {
+      return value;
     }
   }
 
@@ -5614,8 +6062,7 @@ Object* JSObject::SetFastElement(uint32_t index, Object* value) {
     if (IsJSArray()) {
       // Update the length of the array if needed.
       uint32_t array_length = 0;
-      CHECK(Array::IndexFromObject(JSArray::cast(this)->length(),
-                                   &array_length));
+      CHECK(JSArray::cast(this)->length()->ToArrayIndex(&array_length));
       if (index >= array_length) {
         JSArray::cast(this)->set_length(Smi::FromInt(index + 1));
       }
@@ -5722,18 +6169,7 @@ Object* JSObject::SetElementWithoutInterceptor(uint32_t index, Object* value) {
         Object* element = dictionary->ValueAt(entry);
         PropertyDetails details = dictionary->DetailsAt(entry);
         if (details.type() == CALLBACKS) {
-          // Only accessors allowed as elements.
-          FixedArray* structure = FixedArray::cast(element);
-          if (structure->get(kSetterIndex)->IsJSFunction()) {
-            JSFunction* setter = JSFunction::cast(structure->get(kSetterIndex));
-            return SetPropertyWithDefinedSetter(setter, value);
-          } else {
-            Handle<Object> self(this);
-            Handle<Object> key(Factory::NewNumberFromUint(index));
-            Handle<Object> args[2] = { key, self };
-            return Top::Throw(*Factory::NewTypeError("no_setter_in_callback",
-                                                     HandleVector(args, 2)));
-          }
+          return SetElementWithCallback(element, index, value, this);
         } else {
           dictionary->UpdateMaxNumberKey(index);
           dictionary->ValueAtPut(entry, value);
@@ -5741,10 +6177,8 @@ Object* JSObject::SetElementWithoutInterceptor(uint32_t index, Object* value) {
       } else {
         // Index not already used. Look for an accessor in the prototype chain.
         if (!IsJSArray()) {
-          Object* setter = LookupCallbackSetterInPrototypes(index);
-          if (setter->IsJSFunction()) {
-            return SetPropertyWithDefinedSetter(JSFunction::cast(setter),
-                                                value);
+          if (SetElementWithCallbackSetterInPrototypes(index, value)) {
+            return value;
           }
         }
         Object* result = dictionary->AtNumberPut(index, value);
@@ -5766,8 +6200,7 @@ Object* JSObject::SetElementWithoutInterceptor(uint32_t index, Object* value) {
       if (ShouldConvertToFastElements()) {
         uint32_t new_length = 0;
         if (IsJSArray()) {
-          CHECK(Array::IndexFromObject(JSArray::cast(this)->length(),
-                                       &new_length));
+          CHECK(JSArray::cast(this)->length()->ToArrayIndex(&new_length));
           JSArray::cast(this)->set_length(Smi::FromInt(new_length));
         } else {
           new_length = NumberDictionary::cast(elements())->max_number_key() + 1;
@@ -5798,7 +6231,7 @@ Object* JSObject::SetElementWithoutInterceptor(uint32_t index, Object* value) {
 
 Object* JSArray::JSArrayUpdateLengthFromIndex(uint32_t index, Object* value) {
   uint32_t old_len = 0;
-  CHECK(Array::IndexFromObject(length(), &old_len));
+  CHECK(length()->ToArrayIndex(&old_len));
   // Check to see if we need to update the length. For now, we make
   // sure that the length stays within 32-bits (unsigned).
   if (index >= old_len && index != 0xffffffff) {
@@ -5847,16 +6280,10 @@ Object* JSObject::GetElementPostInterceptor(JSObject* receiver,
         Object* element = dictionary->ValueAt(entry);
         PropertyDetails details = dictionary->DetailsAt(entry);
         if (details.type() == CALLBACKS) {
-          // Only accessors allowed as elements.
-          FixedArray* structure = FixedArray::cast(element);
-          Object* getter = structure->get(kGetterIndex);
-          if (getter->IsJSFunction()) {
-            return GetPropertyWithDefinedGetter(receiver,
-                                                JSFunction::cast(getter));
-          } else {
-            // Getter is not a function.
-            return Heap::undefined_value();
-          }
+          return GetElementWithCallback(receiver,
+                                        element,
+                                        index,
+                                        this);
         }
         return element;
       }
@@ -6004,16 +6431,10 @@ Object* JSObject::GetElementWithReceiver(JSObject* receiver, uint32_t index) {
         Object* element = dictionary->ValueAt(entry);
         PropertyDetails details = dictionary->DetailsAt(entry);
         if (details.type() == CALLBACKS) {
-          // Only accessors allowed as elements.
-          FixedArray* structure = FixedArray::cast(element);
-          Object* getter = structure->get(kGetterIndex);
-          if (getter->IsJSFunction()) {
-            return GetPropertyWithDefinedGetter(receiver,
-                                                JSFunction::cast(getter));
-          } else {
-            // Getter is not a function.
-            return Heap::undefined_value();
-          }
+          return GetElementWithCallback(receiver,
+                                        element,
+                                        index,
+                                        this);
         }
         return element;
       }
@@ -6092,7 +6513,7 @@ bool JSObject::ShouldConvertToFastElements() {
   // fast elements.
   uint32_t length = 0;
   if (IsJSArray()) {
-    CHECK(Array::IndexFromObject(JSArray::cast(this)->length(), &length));
+    CHECK(JSArray::cast(this)->length()->ToArrayIndex(&length));
   } else {
     length = dictionary->max_number_key();
   }
@@ -6147,9 +6568,9 @@ void Dictionary<Shape, Key>::CopyValuesTo(FixedArray* elements) {
 InterceptorInfo* JSObject::GetNamedInterceptor() {
   ASSERT(map()->has_named_interceptor());
   JSFunction* constructor = JSFunction::cast(map()->constructor());
-  Object* template_info = constructor->shared()->function_data();
+  ASSERT(constructor->shared()->IsApiFunction());
   Object* result =
-      FunctionTemplateInfo::cast(template_info)->named_property_handler();
+      constructor->shared()->get_api_func_data()->named_property_handler();
   return InterceptorInfo::cast(result);
 }
 
@@ -6157,9 +6578,9 @@ InterceptorInfo* JSObject::GetNamedInterceptor() {
 InterceptorInfo* JSObject::GetIndexedInterceptor() {
   ASSERT(map()->has_indexed_interceptor());
   JSFunction* constructor = JSFunction::cast(map()->constructor());
-  Object* template_info = constructor->shared()->function_data();
+  ASSERT(constructor->shared()->IsApiFunction());
   Object* result =
-      FunctionTemplateInfo::cast(template_info)->indexed_property_handler();
+      constructor->shared()->get_api_func_data()->indexed_property_handler();
   return InterceptorInfo::cast(result);
 }
 
@@ -6170,7 +6591,9 @@ Object* JSObject::GetPropertyPostInterceptor(JSObject* receiver,
   // Check local property in holder, ignore interceptor.
   LookupResult result;
   LocalLookupRealNamedProperty(name, &result);
-  if (result.IsValid()) return GetProperty(receiver, &result, name, attributes);
+  if (result.IsProperty()) {
+    return GetProperty(receiver, &result, name, attributes);
+  }
   // Continue searching via the prototype chain.
   Object* pt = GetPrototype();
   *attributes = ABSENT;
@@ -6186,8 +6609,10 @@ Object* JSObject::GetLocalPropertyPostInterceptor(
   // Check local property in holder, ignore interceptor.
   LookupResult result;
   LocalLookupRealNamedProperty(name, &result);
-  if (!result.IsValid()) return Heap::undefined_value();
-  return GetProperty(receiver, &result, name, attributes);
+  if (result.IsProperty()) {
+    return GetProperty(receiver, &result, name, attributes);
+  }
+  return Heap::undefined_value();
 }
 
 
@@ -6239,24 +6664,7 @@ bool JSObject::HasRealNamedProperty(String* key) {
 
   LookupResult result;
   LocalLookupRealNamedProperty(key, &result);
-  if (result.IsValid()) {
-    switch (result.type()) {
-      case NORMAL:    // fall through.
-      case FIELD:     // fall through.
-      case CALLBACKS:  // fall through.
-      case CONSTANT_FUNCTION:
-        return true;
-      case INTERCEPTOR:
-      case MAP_TRANSITION:
-      case CONSTANT_TRANSITION:
-      case NULL_DESCRIPTOR:
-        return false;
-      default:
-        UNREACHABLE();
-    }
-  }
-
-  return false;
+  return result.IsProperty() && (result.type() != INTERCEPTOR);
 }
 
 
@@ -6318,7 +6726,7 @@ bool JSObject::HasRealNamedCallbackProperty(String* key) {
 
   LookupResult result;
   LocalLookupRealNamedProperty(key, &result);
-  return result.IsValid() && (result.type() == CALLBACKS);
+  return result.IsProperty() && (result.type() == CALLBACKS);
 }
 
 
@@ -6796,15 +7204,9 @@ class SymbolKey : public HashTableKey {
   }
 
   Object* AsObject() {
-    // If the string is a cons string, attempt to flatten it so that
-    // symbols will most often be flat strings.
-    if (StringShape(string_).IsCons()) {
-      ConsString* cons_string = ConsString::cast(string_);
-      cons_string->TryFlatten();
-      if (cons_string->second()->length() == 0) {
-        string_ = cons_string->first();
-      }
-    }
+    // Attempt to flatten the string, so that symbols will most often
+    // be flat strings.
+    string_ = string_->TryFlattenGetString();
     // Transform string to symbol if possible.
     Map* map = Heap::SymbolMapForString(string_);
     if (map != NULL) {
@@ -6842,15 +7244,17 @@ void HashTable<Shape, Key>::IterateElements(ObjectVisitor* v) {
 
 
 template<typename Shape, typename Key>
-Object* HashTable<Shape, Key>::Allocate(int at_least_space_for) {
-  int capacity = RoundUpToPowerOf2(at_least_space_for);
-  if (capacity < 4) {
-    capacity = 4;  // Guarantee min capacity.
+Object* HashTable<Shape, Key>::Allocate(int at_least_space_for,
+                                        PretenureFlag pretenure) {
+  const int kMinCapacity = 32;
+  int capacity = RoundUpToPowerOf2(at_least_space_for * 2);
+  if (capacity < kMinCapacity) {
+    capacity = kMinCapacity;  // Guarantee min capacity.
   } else if (capacity > HashTable::kMaxCapacity) {
     return Failure::OutOfMemoryException();
   }
 
-  Object* obj = Heap::AllocateHashTable(EntryToIndex(capacity));
+  Object* obj = Heap::AllocateHashTable(EntryToIndex(capacity), pretenure);
   if (!obj->IsFailure()) {
     HashTable::cast(obj)->SetNumberOfElements(0);
     HashTable::cast(obj)->SetNumberOfDeletedElements(0);
@@ -6885,10 +7289,15 @@ Object* HashTable<Shape, Key>::EnsureCapacity(int n, Key key) {
   // Return if:
   //   50% is still free after adding n elements and
   //   at most 50% of the free elements are deleted elements.
-  if ((nof + (nof >> 1) <= capacity) &&
-      (nod <= (capacity - nof) >> 1)) return this;
+  if (nod <= (capacity - nof) >> 1) {
+    int needed_free = nof >> 1;
+    if (nof + needed_free <= capacity) return this;
+  }
 
-  Object* obj = Allocate(nof * 2);
+  const int kMinCapacityForPretenure = 256;
+  bool pretenure =
+      (capacity > kMinCapacityForPretenure) && !Heap::InNewSpace(this);
+  Object* obj = Allocate(nof * 2, pretenure ? TENURED : NOT_TENURED);
   if (obj->IsFailure()) return obj;
 
   AssertNoAllocation no_gc;
@@ -6918,7 +7327,6 @@ Object* HashTable<Shape, Key>::EnsureCapacity(int n, Key key) {
   table->SetNumberOfDeletedElements(0);
   return table;
 }
-
 
 
 template<typename Shape, typename Key>
@@ -7030,8 +7438,7 @@ Object* JSObject::PrepareSlowElementsForSort(uint32_t limit) {
     result_double = HeapNumber::cast(new_double);
   }
 
-  int capacity = dict->Capacity();
-  Object* obj = NumberDictionary::Allocate(dict->Capacity());
+  Object* obj = NumberDictionary::Allocate(dict->NumberOfElements());
   if (obj->IsFailure()) return obj;
   NumberDictionary* new_dict = NumberDictionary::cast(obj);
 
@@ -7039,6 +7446,7 @@ Object* JSObject::PrepareSlowElementsForSort(uint32_t limit) {
 
   uint32_t pos = 0;
   uint32_t undefs = 0;
+  int capacity = dict->Capacity();
   for (int i = 0; i < capacity; i++) {
     Object* k = dict->KeyAt(i);
     if (dict->IsKey(k)) {

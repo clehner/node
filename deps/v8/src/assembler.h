@@ -37,8 +37,8 @@
 
 #include "runtime.h"
 #include "top.h"
-#include "zone-inl.h"
 #include "token.h"
+#include "objects.h"
 
 namespace v8 {
 namespace internal {
@@ -119,9 +119,9 @@ class RelocInfo BASE_EMBEDDED {
     // Please note the order is important (see IsCodeTarget, IsGCRelocMode).
     CONSTRUCT_CALL,  // code target that is a call to a JavaScript constructor.
     CODE_TARGET_CONTEXT,  // code target used for contextual loads.
+    DEBUG_BREAK,
     CODE_TARGET,         // code target which is not any of the above.
     EMBEDDED_OBJECT,
-    EMBEDDED_STRING,
 
     // Everything after runtime_entry (inclusive) is not GC'ed.
     RUNTIME_ENTRY,
@@ -137,7 +137,7 @@ class RelocInfo BASE_EMBEDDED {
     NUMBER_OF_MODES,  // must be no greater than 14 - see RelocInfoWriter
     NONE,  // never recorded
     LAST_CODE_ENUM = CODE_TARGET,
-    LAST_GCED_ENUM = EMBEDDED_STRING
+    LAST_GCED_ENUM = EMBEDDED_OBJECT
   };
 
 
@@ -185,6 +185,11 @@ class RelocInfo BASE_EMBEDDED {
   // Apply a relocation by delta bytes
   INLINE(void apply(intptr_t delta));
 
+  // Is the pointer this relocation info refers to coded like a plain pointer
+  // or is it strange in some way (eg relative or patched into a series of
+  // instructions).
+  bool IsCodedSpecially();
+
   // Read/modify the code target in the branch/call instruction
   // this relocation applies to;
   // can only be called if IsCodeTarget(rmode_) || rmode_ == RUNTIME_ENTRY
@@ -195,9 +200,23 @@ class RelocInfo BASE_EMBEDDED {
   INLINE(Object** target_object_address());
   INLINE(void set_target_object(Object* target));
 
-  // Read the address of the word containing the target_address. Can only
-  // be called if IsCodeTarget(rmode_) || rmode_ == RUNTIME_ENTRY.
+  // Read the address of the word containing the target_address in an
+  // instruction stream.  What this means exactly is architecture-independent.
+  // The only architecture-independent user of this function is the serializer.
+  // The serializer uses it to find out how many raw bytes of instruction to
+  // output before the next target.  Architecture-independent code shouldn't
+  // dereference the pointer it gets back from this.
   INLINE(Address target_address_address());
+  // This indicates how much space a target takes up when deserializing a code
+  // stream.  For most architectures this is just the size of a pointer.  For
+  // an instruction like movw/movt where the target bits are mixed into the
+  // instruction bits the size of the target will be zero, indicating that the
+  // serializer should not step forwards in memory after a target is resolved
+  // and written.  In this case the target_address_address function above
+  // should return the end of the instructions to be patched, allowing the
+  // deserializer to deserialize the instructions as raw bytes and put them in
+  // place, ready to be patched with the target.
+  INLINE(int target_address_size());
 
   // Read/modify the reference in the instruction this relocation
   // applies to; can only be called if rmode_ is external_reference
@@ -211,6 +230,8 @@ class RelocInfo BASE_EMBEDDED {
   INLINE(Object* call_object());
   INLINE(Object** call_object_address());
   INLINE(void set_call_object(Object* target));
+
+  inline void Visit(ObjectVisitor* v);
 
   // Patch the code with some other code.
   void PatchCode(byte* instructions, int instruction_count);
@@ -398,7 +419,9 @@ class ExternalReference BASE_EMBEDDED {
   // ExternalReferenceTable in serialize.cc manually.
 
   static ExternalReference perform_gc_function();
-  static ExternalReference random_positive_smi_function();
+  static ExternalReference fill_heap_number_with_random_function();
+  static ExternalReference random_uint32_function();
+  static ExternalReference transcendental_cache_array_address();
 
   // Static data in the keyed lookup cache.
   static ExternalReference keyed_lookup_cache_keys();
@@ -426,6 +449,7 @@ class ExternalReference BASE_EMBEDDED {
 
   // Static variable Heap::NewSpaceStart()
   static ExternalReference new_space_start();
+  static ExternalReference new_space_mask();
   static ExternalReference heap_always_allocate_scope_depth();
 
   // Used for fast allocation in generated code.
@@ -451,7 +475,7 @@ class ExternalReference BASE_EMBEDDED {
   static ExternalReference debug_step_in_fp_address();
 #endif
 
-#ifdef V8_NATIVE_REGEXP
+#ifndef V8_INTERPRETED_REGEXP
   // C functions called from RegExp generated code.
 
   // Function NativeRegExpMacroAssembler::CaseInsensitiveCompareUC16()
@@ -506,8 +530,10 @@ static inline bool is_intn(int x, int n)  {
   return -(1 << (n-1)) <= x && x < (1 << (n-1));
 }
 
-static inline bool is_int24(int x)  { return is_intn(x, 24); }
 static inline bool is_int8(int x)  { return is_intn(x, 8); }
+static inline bool is_int16(int x)  { return is_intn(x, 16); }
+static inline bool is_int18(int x)  { return is_intn(x, 18); }
+static inline bool is_int24(int x)  { return is_intn(x, 24); }
 
 static inline bool is_uintn(int x, int n) {
   return (x & -(1 << n)) == 0;
@@ -519,9 +545,20 @@ static inline bool is_uint4(int x)  { return is_uintn(x, 4); }
 static inline bool is_uint5(int x)  { return is_uintn(x, 5); }
 static inline bool is_uint6(int x)  { return is_uintn(x, 6); }
 static inline bool is_uint8(int x)  { return is_uintn(x, 8); }
+static inline bool is_uint10(int x)  { return is_uintn(x, 10); }
 static inline bool is_uint12(int x)  { return is_uintn(x, 12); }
 static inline bool is_uint16(int x)  { return is_uintn(x, 16); }
 static inline bool is_uint24(int x)  { return is_uintn(x, 24); }
+static inline bool is_uint26(int x)  { return is_uintn(x, 26); }
+static inline bool is_uint28(int x)  { return is_uintn(x, 28); }
+
+static inline int NumberOfBitsSet(uint32_t x) {
+  unsigned int num_bits_set;
+  for (num_bits_set = 0; x; x >>= 1) {
+    num_bits_set += x & 1;
+  }
+  return num_bits_set;
+}
 
 } }  // namespace v8::internal
 

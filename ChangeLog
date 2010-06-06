@@ -1,4 +1,325 @@
-2010.02.09, Version 0.1.28
+2010.05.29, Version 0.1.97
+
+* HTTP throttling: outgoing messages emit 'drain' and write() returns false
+  when send buffer is full.
+
+* API: readFileSync without encoding argument now returns a Buffer
+
+* Improve Buffer C++ API; addons now compile with debugging symbols.
+
+* Improvements to  path.extname() and REPL; add fs.chown().
+
+* fs.ReadStream now emits buffers, fs.readFileSync returns buffers.
+
+* Bugfix: parsing HTTP responses to HEAD requests.
+
+* Port to OpenBSD.
+
+* Upgrade V8 to 2.2.12, libeio, http-parser.
+
+
+2010.05.21, Version 0.1.96, 9514a4d5476225e8c8310ce5acae2857033bcaaa
+
+* Thrown errors in http and socket call back get bubbled up.
+
+* Add fs.fsync (Andrew Johnston)
+
+* Bugfix: signal unregistering (Jonas Pfenniger)
+
+* Added better error messages for async and sync fs calls with paths
+  (TJ Holowaychuk)
+
+* Support arrays and strings in buffer constructor.
+  (Felix Geisendörfer)
+
+* Fix errno reporting in DNS exceptions.
+
+* Support buffers in fs.WriteStream.write.
+
+* Bugfix: Safely decode a utf8 streams that are broken on a multbyte
+  character (http and net). (Felix Geisendörfer)
+
+* Make Buffer's C++ constructor public.
+
+* Deprecate sys.p()
+
+* FIX path.dirname('/tmp') => '/'. (Jonathan Rentzsch)
+
+
+2010.05.13, Version 0.1.95, 0914d33842976c2c870df06573b68f9192a1fb7a
+
+* Change GC idle notify so that it runs alongside setInterval
+
+* Install node_buffer.h on make install
+
+* fs.readFile returns Buffer by default (Tim Caswell)
+
+* Fix error reporting in child_process callbacks
+
+* Better logic for testing if an argument is a port
+
+* Improve error reporting (single line "node.js:176:9" errors)
+
+* Bugfix: Some http responses being truncated (appeared in 0.1.94)
+
+* Fix long standing net idle timeout bugs. Enable 2 minute timeout
+  by default in HTTP servers.
+
+* Add fs.fstat (Ben Noordhuis)
+
+* Upgrade to V8 2.2.9
+
+
+2010.05.06, Version 0.1.94, f711d5343b29d1e72e87107315708e40951a7826
+
+* Look in /usr/local/lib/node for modules, so that there's a way 
+  to install modules globally (Issac Schlueter)
+
+* SSL improvements (Rhys Jones, Paulo Matias)
+
+* Added c-ares headers for linux-arm (Jonathan Knezek)
+
+* Add symbols to release build
+
+* HTTP upgrade improvements, docs (Micheil Smith)
+
+* HTTP server emits 'clientError' instead of printing message
+
+* Bugfix: Don't emit 'error' twice from http.Client
+
+* Bugfix: Ignore SIGPIPE
+
+* Bugfix: destroy() instead of end() http connection at end of
+  pipeline
+
+* Bugfix: http.Client may be prematurely released back to the 
+  free pool.  (Thomas Lee)
+
+* Upgrade V8 to 2.2.8
+
+
+2010.04.29, Version 0.1.93, 557ba6bd97bad3afe0f9bd3ac07efac0a39978c1
+
+  * Fixed no 'end' event on long chunked HTTP messages
+    http://github.com/ry/node/issues/#issue/77
+
+  * Remove legacy modules http_old and tcp_old
+
+  * Support DNS MX queries (Jérémy Lal)
+
+  * Fix large socket write (tlb@tlb.org)
+
+  * Fix child process exit codes (Felix Geisendörfer)
+
+  * Allow callers to disable PHP/Rails style parameter mungeing in
+    querystring.stringify (Thomas Lee)
+
+  * Upgrade V8 to 2.2.6
+
+
+2010.04.23, Version 0.1.92, caa828a242f39b6158084ef4376355161c14fe34
+
+  * OpenSSL support. Still undocumented (see tests). (Rhys Jones)
+
+  * API: Unhandled 'error' events throw.
+
+  * Script class with eval-function-family in binding('evals') plus tests.
+    (Herbert Vojcik)
+
+  * stream.setKeepAlive (Julian Lamb)
+
+  * Bugfix: Force no body on http 204 and 304
+
+  * Upgrade Waf to 1.5.16, V8 to 2.2.4.2
+
+
+2010.04.15, Version 0.1.91, 311d7dee19034ff1c6bc9098c36973b8d687eaba
+
+  * Add incoming.httpVersion
+
+  * Object.prototype problem with C-Ares binding
+
+  * REPL can be run from multiple different streams. (Matt Ranney)
+
+  * After V8 heap is compact, don't use a timer every 2 seconds.
+
+  * Improve nextTick implementation.
+
+  * Add primative support for Upgrading HTTP connections.
+    (See commit log for docs 760bba5)
+
+  * Add timeout and maxBuffer options to child_process.exec
+
+  * Fix bugs.
+
+  * Upgrade V8 to 2.2.3.1
+
+
+2010.04.09, Version 0.1.90, 07e64d45ffa1856e824c4fa6afd0442ba61d6fd8
+
+  * Merge writing of networking system (net2)
+   - New Buffer object for binary data.
+   - Support UNIX sockets, Pipes
+   - Uniform stream API
+   - Currently no SSL
+   - Legacy modules can be accessed at 'http_old' and 'tcp_old'
+
+  * Replace udns with c-ares. (Krishna Rajendran)
+
+  * New documentation system using Markdown and Ronn
+    (Tim Caswell, Micheil Smith)
+
+  * Better idle-time GC
+
+  * Countless small bug fixes.
+
+  * Upgrade V8 to 2.2.X, WAF 1.5.15
+
+
+2010.03.19, Version 0.1.33, 618296ef571e873976f608d91a3d6b9e65fe8284
+
+  * Include lib/ directory in node executable. Compile on demand.
+
+  * evalcx clean ups (Isaac Z. Schlueter, Tim-Smart)
+
+  * Various fixes, clean ups
+
+  * V8 upgraded to 2.1.5
+
+
+2010.03.12, Version 0.1.32, 61c801413544a50000faa7f58376e9b33ba6254f
+
+  * Optimize event emitter for single listener
+
+  * Add process.evalcx, require.registerExtension (Tim Smart)
+
+  * Replace --cflags with --vars
+
+  * Fix bugs in fs.create*Stream (Felix Geisendörfer)
+
+  * Deprecate process.mixin, process.unloop
+
+  * Remove the 'Error: (no message)' exceptions, print stack
+    trace instead
+
+  * INI parser bug fixes (Isaac Schlueter)
+
+  * FreeBSD fixes (Vanilla Hsu)
+
+  * Upgrade to V8 2.1.3, WAF 1.5.14a, libev
+
+
+2010.03.05, Version 0.1.31, 39b63dfe1737d46a8c8818c92773ef181fd174b3
+
+  * API: - Move process.watchFile into fs module
+         - Move process.inherits to sys
+
+  * Improve Solaris port
+
+  * tcp.Connection.prototype.write now returns boolean to indicate if
+    argument was flushed to the kernel buffer.
+
+  * Added fs.link, fs.symlink, fs.readlink, fs.realpath
+    (Rasmus Andersson)
+
+  * Add setgid,getgid (James Duncan)
+
+  * Improve sys.inspect (Benjamin Thomas)
+
+  * Allow passing env to child process (Isaac Schlueter)
+
+  * fs.createWriteStream, fs.createReadStream (Felix Geisendörfer)
+
+  * Add INI parser (Rob Ellis)
+
+  * Bugfix: fs.readFile handling encoding (Jacek Becela)
+
+  * Upgrade V8 to 2.1.2
+
+
+2010.02.22, Version 0.1.30, bb0d1e65e1671aaeb21fac186b066701da0bc33b
+
+  * Major API Changes
+
+    - Promises removed. See
+      http://groups.google.com/group/nodejs/msg/426f3071f3eec16b
+      http://groups.google.com/group/nodejs/msg/df199d233ff17efa
+      The API for fs was
+
+         fs.readdir("/usr").addCallback(function (files) {
+           puts("/usr files: " + files);
+         });
+
+      It is now
+
+         fs.readdir("/usr", function (err, files) {
+           if (err) throw err;
+           puts("/usr files: " + files);
+         });
+
+    - Synchronous fs operations exposed, use with care.
+
+    - tcp.Connection.prototype.readPause() and readResume()
+      renamed to pause() and resume()
+
+    - http.ServerResponse.prototype.sendHeader() renamed to
+      writeHeader(). Now accepts reasonPhrase.
+
+  * Compact garbage on idle.
+
+  * Configurable debug ports, and --debug-brk (Zoran Tomicic)
+
+  * Better command line option parsing (Jeremy Ashkenas)
+
+  * Add fs.chmod (Micheil Smith), fs.lstat (Isaac Z. Schlueter)
+
+  * Fixes to process.mixin (Rasmus Andersson, Benjamin Thomas)
+
+  * Upgrade V8 to 2.1.1
+
+
+2010.02.17, Version 0.1.29, 87d5e5b316a4276bcf881f176971c1a237dcdc7a
+
+  * Major API Changes
+    - Remove 'file' module
+    - require('posix') -----------------> require('fs')
+    - fs.cat ---------------------------> fs.readFile
+    - file.write -----------------------> fs.writeFile
+    - TCP 'receive' event --------------> 'data'
+    - TCP 'eof' event ------------------> 'end'
+    - TCP send() -----------------------> write()
+    - HTTP sendBody() ------------------> write()
+    - HTTP finish() --------------------> close()
+    - HTTP 'body' event ----------------> 'data'
+    - HTTP 'complete' event ------------> 'end'
+    - http.Client.prototype.close() (formerly finish()) no longer
+      takes an argument. Add the 'response' listener manually.
+    - Allow strings for the flag argument to fs.open
+      ("r", "r+", "w", "w+", "a", "a+")
+
+  * Added multiple arg support for sys.puts(), print(), etc.
+    (tj@vision-media.ca)
+
+  * sys.inspect(Date) now shows the date value (Mark Hansen)
+
+  * Calculate page size with getpagesize for armel (Jérémy Lal)
+
+  * Bugfix: stderr flushing.
+
+  * Bugfix: Promise late chain (Yuichiro MASUI)
+
+  * Bugfix: wait() on fired promises
+    (Felix Geisendörfer, Jonas Pfenniger)
+
+  * Bugfix: Use InstanceTemplate() instead of PrototypeTemplate() for
+    accessor methods. Was causing a crash with Eclipse debugger.
+    (Zoran Tomicic)
+
+  * Bugfix: Throw from connection.connect if resolving.
+    (Reported by James Golick)
+
+
+2010.02.09, Version 0.1.28, 49de41ef463292988ddacfb01a20543b963d9669
 
   * Use Google's jsmin.py which can be used for evil.
 
@@ -134,7 +455,7 @@
 
   * Bugfix: correctly check kqueue and epoll. (Rasmus Andersson)
 
-  * Upgrade WAF to 1.5.10 
+  * Upgrade WAF to 1.5.10
 
   * Bugfix: posix.statSync() was crashing
 
@@ -248,12 +569,12 @@
     - __module becomes module
 
   * API: Many namespacing changes
-    - Move node.* into process.* 
+    - Move node.* into process.*
     - Move node.dns into module "dns"
     - Move node.fs into module "posix"
     - process is no longer the global object. GLOBAL is.
 
-  For more information on the API changes see: 
+  For more information on the API changes see:
     http://thread.gmane.org/gmane.comp.lang.javascript.nodejs/6
     http://thread.gmane.org/gmane.comp.lang.javascript.nodejs/14
 
@@ -315,7 +636,7 @@
 
   * Feature: Multipart stream parser (Felix Geisendörfer)
 
-  * API: Move node.puts(), node.exec() and others to /utils.js 
+  * API: Move node.puts(), node.exec() and others to /utils.js
 
   * API: Move http, tcp libraries to /http.js and /tcp.js
 
@@ -338,7 +659,7 @@
     whole files at once.
 
 
-2009.09.24, Version 0.1.12, 2f56ccb45e87510de712f56705598b3b4e3548ec 
+2009.09.24, Version 0.1.12, 2f56ccb45e87510de712f56705598b3b4e3548ec
 
   * Feature: System modules, node.libraryPaths
 
@@ -357,7 +678,7 @@
 
   * API: default to utf8 encoding for node.fs.cat()
 
-  * API: add node.exec() 
+  * API: add node.exec()
 
   * API: node.fs.read() takes a normal encoding parameter.
 

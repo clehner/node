@@ -1,10 +1,16 @@
 path = require("path");
+Buffer = require("buffer").Buffer;
 
-libDir = path.join(path.dirname(__filename), "../lib");
-require.paths.unshift(libDir);
+port = parseInt(process.env.PORT || 8000);
 
-process.mixin(require("sys"));
-http = require("http");
+var puts = require("sys").puts;
+
+var old = (process.argv[2] == 'old');
+
+puts('pid ' + process.pid);
+
+http = require(old ? "http_old" : 'http');
+if (old) puts('old version');
 
 fixed = ""
 for (var i = 0; i < 20*1024; i++) {
@@ -12,6 +18,7 @@ for (var i = 0; i < 20*1024; i++) {
 }
 
 stored = {};
+storedBuffer = {};
 
 http.createServer(function (req, res) {
   var commands = req.url.split("/");
@@ -33,6 +40,18 @@ http.createServer(function (req, res) {
     }
     body = stored[n];
 
+  } else if (command == "buffer") {
+    var n = parseInt(arg, 10)
+    if (n <= 0) throw new Error("bytes called with n <= 0");
+    if (storedBuffer[n] === undefined) {
+      puts("create storedBuffer[n]");
+      storedBuffer[n] = new Buffer(n);
+      for (var i = 0; i < n; i++) {
+        storedBuffer[n][i] = "C".charCodeAt(0);
+      }
+    }
+    body = storedBuffer[n];
+
   } else if (command == "quit") {
     res.connection.server.close();
     body = "quitting";
@@ -47,12 +66,17 @@ http.createServer(function (req, res) {
 
   var content_length = body.length.toString();
 
-  res.sendHeader( status 
+  res.writeHead( status 
                 , { "Content-Type": "text/plain"
                   , "Content-Length": content_length
                   }
                 );
-  res.sendBody(body);
-          
-  res.finish();
-}).listen(8000);
+  if (old) {
+    res.write(body, 'ascii');
+    res.close();
+  } else {
+    res.end(body, 'ascii');
+  }
+}).listen(port);
+
+puts('Listening at http://127.0.0.1:'+port+'/');

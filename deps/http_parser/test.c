@@ -34,6 +34,8 @@
 #define MAX_HEADERS 10
 #define MAX_ELEMENT_SIZE 500
 
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
+
 static http_parser *parser;
 
 struct message {
@@ -47,10 +49,13 @@ struct message {
   char fragment[MAX_ELEMENT_SIZE];
   char query_string[MAX_ELEMENT_SIZE];
   char body[MAX_ELEMENT_SIZE];
+  size_t body_size;
   int num_headers;
   enum { NONE=0, FIELD, VALUE } last_header_element;
   char headers [MAX_HEADERS][2][MAX_ELEMENT_SIZE];
   int should_keep_alive;
+
+  int upgrade;
 
   unsigned short http_major;
   unsigned short http_minor;
@@ -62,14 +67,6 @@ struct message {
 };
 
 static int currently_parsing_eof;
-
-inline size_t parse (const char *buf, size_t len)
-{
-  size_t nparsed;
-  currently_parsing_eof = (len == 0);
-  nparsed = http_parser_execute(parser, buf, len);
-  return nparsed;
-}
 
 static struct message messages[5];
 static int num_messages;
@@ -464,6 +461,40 @@ const struct message requests[] =
   ,.body= ""
   }
 
+#define UPGRADE_REQUEST 16
+, {.name = "upgrade request"
+  ,.type= HTTP_REQUEST
+  ,.raw= "GET /demo HTTP/1.1\r\n"
+         "Host: example.com\r\n"
+         "Connection: Upgrade\r\n"
+         "Sec-WebSocket-Key2: 12998 5 Y3 1  .P00\r\n"
+         "Sec-WebSocket-Protocol: sample\r\n"
+         "Upgrade: WebSocket\r\n"
+         "Sec-WebSocket-Key1: 4 @1  46546xW%0l 1 5\r\n"
+         "Origin: http://example.com\r\n"
+         "\r\n"
+  ,.should_keep_alive= TRUE
+  ,.message_complete_on_eof= FALSE
+  ,.http_major= 1
+  ,.http_minor= 1
+  ,.method= HTTP_GET
+  ,.query_string= ""
+  ,.fragment= ""
+  ,.request_path= "/demo"
+  ,.request_url= "/demo"
+  ,.num_headers= 7
+  ,.upgrade=1
+  ,.headers= { { "Host", "example.com" }
+             , { "Connection", "Upgrade" }
+             , { "Sec-WebSocket-Key2", "12998 5 Y3 1  .P00" }
+             , { "Sec-WebSocket-Protocol", "sample" }
+             , { "Upgrade", "WebSocket" }
+             , { "Sec-WebSocket-Key1", "4 @1  46546xW%0l 1 5" }
+             , { "Origin", "http://example.com" }
+             }
+  ,.body= ""
+  }
+
 , {.name= NULL } /* sentinel */
 };
 
@@ -569,6 +600,7 @@ const struct message responses[] =
   ,.status_code= 404
   ,.num_headers= 0
   ,.headers= {}
+  ,.body_size= 0
   ,.body= ""
   }
 
@@ -611,6 +643,7 @@ const struct message responses[] =
     { {"Content-Type", "text/plain" }
     , {"Transfer-Encoding", "chunked" }
     }
+  ,.body_size = 37+28
   ,.body =
          "This is the data in the first chunk\r\n"
          "and this is the second one\r\n"
@@ -757,7 +790,17 @@ body_cb (http_parser *p, const char *buf, size_t len)
 {
   assert(p == parser);
   strncat(messages[num_messages].body, buf, len);
+  messages[num_messages].body_size += len;
  // printf("body_cb: '%s'\n", requests[num_messages].body);
+  return 0;
+}
+
+int
+count_body_cb (http_parser *p, const char *buf, size_t len)
+{
+  assert(p == parser);
+  assert(buf);
+  messages[num_messages].body_size += len;
   return 0;
 }
 
@@ -802,6 +845,32 @@ message_complete_cb (http_parser *p)
   return 0;
 }
 
+static http_parser_settings settings =
+  {.on_message_begin = message_begin_cb
+  ,.on_header_field = header_field_cb
+  ,.on_header_value = header_value_cb
+  ,.on_path = request_path_cb
+  ,.on_url = request_url_cb
+  ,.on_fragment = fragment_cb
+  ,.on_query_string = query_string_cb
+  ,.on_body = body_cb
+  ,.on_headers_complete = headers_complete_cb
+  ,.on_message_complete = message_complete_cb
+  };
+
+static http_parser_settings settings_count_body =
+  {.on_message_begin = message_begin_cb
+  ,.on_header_field = header_field_cb
+  ,.on_header_value = header_value_cb
+  ,.on_path = request_path_cb
+  ,.on_url = request_url_cb
+  ,.on_fragment = fragment_cb
+  ,.on_query_string = query_string_cb
+  ,.on_body = count_body_cb
+  ,.on_headers_complete = headers_complete_cb
+  ,.on_message_complete = message_complete_cb
+  };
+
 void
 parser_init (enum http_parser_type type)
 {
@@ -815,16 +884,6 @@ parser_init (enum http_parser_type type)
 
   memset(&messages, 0, sizeof messages);
 
-  parser->on_message_begin     = message_begin_cb;
-  parser->on_header_field      = header_field_cb;
-  parser->on_header_value      = header_value_cb;
-  parser->on_path              = request_path_cb;
-  parser->on_url               = request_url_cb;
-  parser->on_fragment          = fragment_cb;
-  parser->on_query_string      = query_string_cb;
-  parser->on_body              = body_cb;
-  parser->on_headers_complete  = headers_complete_cb;
-  parser->on_message_complete  = message_complete_cb;
 }
 
 void
@@ -833,6 +892,22 @@ parser_free ()
   assert(parser);
   free(parser);
   parser = NULL;
+}
+
+inline size_t parse (const char *buf, size_t len)
+{
+  size_t nparsed;
+  currently_parsing_eof = (len == 0);
+  nparsed = http_parser_execute(parser, &settings, buf, len);
+  return nparsed;
+}
+
+inline size_t parse_count_body (const char *buf, size_t len)
+{
+  size_t nparsed;
+  currently_parsing_eof = (len == 0);
+  nparsed = http_parser_execute(parser, &settings_count_body, buf, len);
+  return nparsed;
 }
 
 static inline int
@@ -897,7 +972,11 @@ message_eq (int index, const struct message *expected)
   MESSAGE_CHECK_STR_EQ(expected, m, query_string);
   MESSAGE_CHECK_STR_EQ(expected, m, fragment);
   MESSAGE_CHECK_STR_EQ(expected, m, request_url);
-  MESSAGE_CHECK_STR_EQ(expected, m, body);
+  if (expected->body_size) {
+    MESSAGE_CHECK_NUM_EQ(expected, m, body_size);
+  } else {
+    MESSAGE_CHECK_STR_EQ(expected, m, body);
+  }
 
   MESSAGE_CHECK_NUM_EQ(expected, m, num_headers);
 
@@ -950,7 +1029,7 @@ print_error (const char *raw, size_t error_location)
   for (j = 0; j < error_location_line; j++) {
     fputc(' ', stderr);
   }
-  fprintf(stderr, "^\n\nerror location: %d\n", error_location);
+  fprintf(stderr, "^\n\nerror location: %u\n", (unsigned int)error_location);
 }
 
 
@@ -962,12 +1041,56 @@ test_message (const struct message *message)
   size_t read;
 
   read = parse(message->raw, strlen(message->raw));
+
+  if (message->upgrade && parser->upgrade) goto test;
+
   if (read != strlen(message->raw)) {
     print_error(message->raw, read);
     exit(1);
   }
 
   read = parse(NULL, 0);
+
+  if (message->upgrade && parser->upgrade) goto test;
+
+  if (read != 0) {
+    print_error(message->raw, read);
+    exit(1);
+  }
+
+test:
+
+  if (num_messages != 1) {
+    printf("\n*** num_messages != 1 after testing '%s' ***\n\n", message->name);
+    exit(1);
+  }
+
+  if(!message_eq(0, message)) exit(1);
+
+  parser_free();
+}
+
+void
+test_message_count_body (const struct message *message)
+{
+  parser_init(message->type);
+
+  size_t read;
+  size_t l = strlen(message->raw);
+  size_t i, toread;
+  size_t chunk = 4024;
+
+  for (i = 0; i < l; i+= chunk) {
+    toread = MIN(l-i, chunk);
+    read = parse_count_body(message->raw + i, toread);
+    if (read != toread) {
+      print_error(message->raw, read);
+      exit(1);
+    }
+  }
+
+
+  read = parse_count_body(NULL, 0);
   if (read != 0) {
     print_error(message->raw, read);
     exit(1);
@@ -1006,6 +1129,13 @@ out:
 void
 test_multiple3 (const struct message *r1, const struct message *r2, const struct message *r3)
 {
+  int message_count = 1;
+  if (!r1->upgrade) {
+    message_count++;
+    if (!r2->upgrade) message_count++;
+  }
+  int has_upgrade = (message_count < 3 || r3->upgrade);
+
   char total[ strlen(r1->raw)
             + strlen(r2->raw)
             + strlen(r3->raw)
@@ -1022,25 +1152,37 @@ test_multiple3 (const struct message *r1, const struct message *r2, const struct
   size_t read;
 
   read = parse(total, strlen(total));
+
+  if (has_upgrade && parser->upgrade) goto test;
+
   if (read != strlen(total)) {
     print_error(total, read);
     exit(1);
   }
 
   read = parse(NULL, 0);
+
+  if (has_upgrade && parser->upgrade) goto test;
+
   if (read != 0) {
     print_error(total, read);
     exit(1);
   }
 
-  if (3 != num_messages) {
+test:
+
+  if (message_count != num_messages) {
     fprintf(stderr, "\n\n*** Parser didn't see 3 messages only %d *** \n", num_messages);
     exit(1);
   }
 
   if (!message_eq(0, r1)) exit(1);
-  if (!message_eq(1, r2)) exit(1);
-  if (!message_eq(2, r3)) exit(1);
+  if (message_count > 1) {
+    if (!message_eq(1, r2)) exit(1);
+    if (message_count > 2) {
+      if (!message_eq(2, r3)) exit(1);
+    }
+  }
 
   parser_free();
 }
@@ -1142,11 +1284,55 @@ test_scan (const struct message *r1, const struct message *r2, const struct mess
 
 error:
   fprintf(stderr, "i=%d  j=%d\n", i, j);
-  fprintf(stderr, "buf1 (%d) %s\n\n", buf1_len, buf1);
-  fprintf(stderr, "buf2 (%d) %s\n\n", buf2_len , buf2);
-  fprintf(stderr, "buf3 (%d) %s\n", buf3_len, buf3);
+  fprintf(stderr, "buf1 (%u) %s\n\n", (unsigned int)buf1_len, buf1);
+  fprintf(stderr, "buf2 (%u) %s\n\n", (unsigned int)buf2_len , buf2);
+  fprintf(stderr, "buf3 (%u) %s\n", (unsigned int)buf3_len, buf3);
   exit(1);
 }
+
+// user required to free the result
+// string terminated by \0
+char *
+create_large_chunked_message (int body_size_in_kb, const char* headers)
+{
+  int i;
+  size_t needed, wrote = 0;
+  size_t headers_len = strlen(headers);
+  size_t bufsize = headers_len + 10;
+  char * buf = malloc(bufsize);
+
+  strncpy(buf, headers, headers_len);
+  wrote += headers_len;
+
+  for (i = 0; i < body_size_in_kb; i++) {
+    // write 1kb chunk into the body.
+    needed = 5 + 1024 + 2; // "400\r\nCCCC...CCCC\r\n"
+    if (bufsize - wrote < needed) {
+      buf = realloc(buf, bufsize + needed);
+      bufsize += needed;
+    }
+
+    strcpy(buf + wrote, "400\r\n");
+    wrote += 5;
+    memset(buf + wrote, 'C', 1024);
+    wrote += 1024;
+    strcpy(buf + wrote, "\r\n");
+    wrote += 2;
+  }
+
+  needed = 5; // "0\r\n\r\n"
+  if (bufsize - wrote < needed) {
+    buf = realloc(buf, bufsize + needed);
+    bufsize += needed;
+  }
+  strcpy(buf + wrote, "0\r\n\r\n");
+  wrote += 5;
+
+  assert(buf[wrote] == 0);
+
+  return buf;
+}
+
 
 int
 main (void)
@@ -1156,7 +1342,7 @@ main (void)
   int request_count;
   int response_count;
 
-  printf("sizeof(http_parser) = %d\n", sizeof(http_parser));
+  printf("sizeof(http_parser) = %u\n", (unsigned int)sizeof(http_parser));
 
   for (request_count = 0; requests[request_count].name; request_count++);
   for (response_count = 0; responses[response_count].name; response_count++);
@@ -1176,6 +1362,38 @@ main (void)
       }
     }
   }
+
+  test_message_count_body(&responses[NO_HEADERS_NO_BODY_404]);
+  test_message_count_body(&responses[TRAILING_SPACE_ON_CHUNKED_BODY]);
+
+  // test very large chunked response
+  {
+    char * msg = create_large_chunked_message(31337,
+      "HTTP/1.0 200 OK\r\n"
+      "Transfer-Encoding: chunked\r\n"
+      "Content-Type: text/plain\r\n"
+      "\r\n");
+    struct message large_chunked =
+      {.name= "large chunked"
+      ,.type= HTTP_RESPONSE
+      ,.raw= msg
+      ,.should_keep_alive= FALSE
+      ,.message_complete_on_eof= FALSE
+      ,.http_major= 1
+      ,.http_minor= 0
+      ,.status_code= 200
+      ,.num_headers= 2
+      ,.headers=
+        { { "Transfer-Encoding", "chunked" }
+        , { "Content-Type", "text/plain" }
+        }
+      ,.body_size= 31337*1024
+      };
+    test_message_count_body(&large_chunked);
+    free(msg);
+  }
+
+
 
   printf("response scan 1/1      ");
   test_scan( &responses[TRAILING_SPACE_ON_CHUNKED_BODY]
