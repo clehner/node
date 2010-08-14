@@ -59,6 +59,31 @@ class FullCodeGenSyntaxChecker: public AstVisitor {
 };
 
 
+// AST node visitor which can tell whether a given statement will be breakable
+// when the code is compiled by the full compiler in the debugger. This means
+// that there will be an IC (load/store/call) in the code generated for the
+// debugger to piggybag on.
+class BreakableStatementChecker: public AstVisitor {
+ public:
+  BreakableStatementChecker() : is_breakable_(false) {}
+
+  void Check(Statement* stmt);
+  void Check(Expression* stmt);
+
+  bool is_breakable() { return is_breakable_; }
+
+ private:
+  // AST node visit functions.
+#define DECLARE_VISIT(type) virtual void Visit##type(type* node);
+  AST_NODE_LIST(DECLARE_VISIT)
+#undef DECLARE_VISIT
+
+  bool is_breakable_;
+
+  DISALLOW_COPY_AND_ASSIGN(BreakableStatementChecker);
+};
+
+
 // -----------------------------------------------------------------------------
 // Full code generator.
 
@@ -364,11 +389,12 @@ class FullCodeGenerator: public AstVisitor {
                        FunctionLiteral* function);
 
   // Platform-specific return sequence
-  void EmitReturnSequence(int position);
+  void EmitReturnSequence();
 
   // Platform-specific code sequences for calls
   void EmitCallWithStub(Call* expr);
   void EmitCallWithIC(Call* expr, Handle<Object> name, RelocInfo::Mode mode);
+  void EmitKeyedCallWithIC(Call* expr, Expression* key, RelocInfo::Mode mode);
 
 
   // Platform-specific code for inline runtime calls.
@@ -376,6 +402,7 @@ class FullCodeGenerator: public AstVisitor {
   void EmitIsSmi(ZoneList<Expression*>* arguments);
   void EmitIsNonNegativeSmi(ZoneList<Expression*>* arguments);
   void EmitIsObject(ZoneList<Expression*>* arguments);
+  void EmitIsSpecObject(ZoneList<Expression*>* arguments);
   void EmitIsUndetectableObject(ZoneList<Expression*>* arguments);
   void EmitIsFunction(ZoneList<Expression*>* arguments);
   void EmitIsArray(ZoneList<Expression*>* arguments);
@@ -405,6 +432,7 @@ class FullCodeGenerator: public AstVisitor {
   void EmitRegExpConstructResult(ZoneList<Expression*>* arguments);
   void EmitSwapElements(ZoneList<Expression*>* arguments);
   void EmitGetFromCache(ZoneList<Expression*>* arguments);
+  void EmitIsRegExpEquivalent(ZoneList<Expression*>* arguments);
 
   // Platform-specific code for loading variables.
   void EmitVariableLoad(Variable* expr, Expression::Context context);
@@ -457,6 +485,7 @@ class FullCodeGenerator: public AstVisitor {
   void SetFunctionPosition(FunctionLiteral* fun);
   void SetReturnPosition(FunctionLiteral* fun);
   void SetStatementPosition(Statement* stmt);
+  void SetExpressionPosition(Expression* expr, int pos);
   void SetStatementPosition(int pos);
   void SetSourcePosition(int pos);
 

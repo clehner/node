@@ -25,6 +25,8 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#ifdef ENABLE_DEBUGGER_SUPPORT
+
 #include <stdlib.h>
 
 #include "v8.h"
@@ -192,8 +194,9 @@ static int SetBreakPoint(Handle<v8::internal::JSFunction> fun, int position) {
   static int break_point = 0;
   Handle<v8::internal::SharedFunctionInfo> shared(fun->shared());
   Debug::SetBreakPoint(
-      shared, position,
-      Handle<Object>(v8::internal::Smi::FromInt(++break_point)));
+      shared,
+      Handle<Object>(v8::internal::Smi::FromInt(++break_point)),
+      &position);
   return break_point;
 }
 
@@ -395,8 +398,9 @@ Handle<FixedArray> GetDebuggedFunctions() {
 
 
 static Handle<Code> ComputeCallDebugBreak(int argc) {
-  CALL_HEAP_FUNCTION(v8::internal::StubCache::ComputeCallDebugBreak(argc),
-                     Code);
+  CALL_HEAP_FUNCTION(
+      v8::internal::StubCache::ComputeCallDebugBreak(argc, Code::CALL_IC),
+      Code);
 }
 
 
@@ -1171,11 +1175,11 @@ TEST(BreakPointReturn) {
   foo->Call(env->Global(), 0, NULL);
   CHECK_EQ(1, break_point_hit_count);
   CHECK_EQ(0, last_source_line);
-  CHECK_EQ(16, last_source_column);
+  CHECK_EQ(15, last_source_column);
   foo->Call(env->Global(), 0, NULL);
   CHECK_EQ(2, break_point_hit_count);
   CHECK_EQ(0, last_source_line);
-  CHECK_EQ(16, last_source_column);
+  CHECK_EQ(15, last_source_column);
 
   // Run without breakpoints.
   ClearBreakPoint(bp);
@@ -1228,6 +1232,11 @@ TEST(GCDuringBreakPointProcessing) {
   SetBreakPoint(foo, 0);
   CallWithBreakPoints(env->Global(), foo, 1, 25);
 
+  // Test debug break slot break point with garbage collection.
+  foo = CompileFunction(&env, "function foo(){var a;}", "foo");
+  SetBreakPoint(foo, 0);
+  CallWithBreakPoints(env->Global(), foo, 1, 25);
+
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
 }
@@ -1235,7 +1244,9 @@ TEST(GCDuringBreakPointProcessing) {
 
 // Call the function three times with different garbage collections in between
 // and make sure that the break point survives.
-static void CallAndGC(v8::Local<v8::Object> recv, v8::Local<v8::Function> f) {
+static void CallAndGC(v8::Local<v8::Object> recv,
+                      v8::Local<v8::Function> f,
+                      bool force_compaction) {
   break_point_hit_count = 0;
 
   for (int i = 0; i < 3; i++) {
@@ -1249,15 +1260,14 @@ static void CallAndGC(v8::Local<v8::Object> recv, v8::Local<v8::Function> f) {
     CHECK_EQ(2 + i * 3, break_point_hit_count);
 
     // Mark sweep (and perhaps compact) and call function.
-    Heap::CollectAllGarbage(false);
+    Heap::CollectAllGarbage(force_compaction);
     f->Call(recv, 0, NULL);
     CHECK_EQ(3 + i * 3, break_point_hit_count);
   }
 }
 
 
-// Test that a break point can be set at a return store location.
-TEST(BreakPointSurviveGC) {
+static void TestBreakPointSurviveGC(bool force_compaction) {
   break_point_hit_count = 0;
   v8::HandleScope scope;
   DebugLocalContext env;
@@ -1267,27 +1277,62 @@ TEST(BreakPointSurviveGC) {
   v8::Local<v8::Function> foo;
 
   // Test IC store break point with garbage collection.
-  foo = CompileFunction(&env, "function foo(){bar=0;}", "foo");
-  SetBreakPoint(foo, 0);
-  CallAndGC(env->Global(), foo);
+  {
+    v8::Local<v8::Function> bar =
+        CompileFunction(&env, "function foo(){}", "foo");
+    foo = CompileFunction(&env, "function foo(){bar=0;}", "foo");
+    SetBreakPoint(foo, 0);
+  }
+  CallAndGC(env->Global(), foo, force_compaction);
 
   // Test IC load break point with garbage collection.
-  foo = CompileFunction(&env, "bar=1;function foo(){var x=bar;}", "foo");
-  SetBreakPoint(foo, 0);
-  CallAndGC(env->Global(), foo);
+  {
+    v8::Local<v8::Function> bar =
+        CompileFunction(&env, "function foo(){}", "foo");
+    foo = CompileFunction(&env, "bar=1;function foo(){var x=bar;}", "foo");
+    SetBreakPoint(foo, 0);
+  }
+  CallAndGC(env->Global(), foo, force_compaction);
 
   // Test IC call break point with garbage collection.
-  foo = CompileFunction(&env, "function bar(){};function foo(){bar();}", "foo");
-  SetBreakPoint(foo, 0);
-  CallAndGC(env->Global(), foo);
+  {
+    v8::Local<v8::Function> bar =
+        CompileFunction(&env, "function foo(){}", "foo");
+    foo = CompileFunction(&env,
+                          "function bar(){};function foo(){bar();}",
+                          "foo");
+    SetBreakPoint(foo, 0);
+  }
+  CallAndGC(env->Global(), foo, force_compaction);
 
   // Test return break point with garbage collection.
-  foo = CompileFunction(&env, "function foo(){}", "foo");
-  SetBreakPoint(foo, 0);
-  CallAndGC(env->Global(), foo);
+  {
+    v8::Local<v8::Function> bar =
+        CompileFunction(&env, "function foo(){}", "foo");
+    foo = CompileFunction(&env, "function foo(){}", "foo");
+    SetBreakPoint(foo, 0);
+  }
+  CallAndGC(env->Global(), foo, force_compaction);
+
+  // Test non IC break point with garbage collection.
+  {
+    v8::Local<v8::Function> bar =
+        CompileFunction(&env, "function foo(){}", "foo");
+    foo = CompileFunction(&env, "function foo(){var bar=0;}", "foo");
+    SetBreakPoint(foo, 0);
+  }
+  CallAndGC(env->Global(), foo, force_compaction);
+
 
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
+}
+
+
+// Test that a break point can be set at a return store location.
+TEST(BreakPointSurviveGC) {
+  TestBreakPointSurviveGC(false);
+  TestBreakPointSurviveGC(true);
 }
 
 
@@ -1657,7 +1702,7 @@ TEST(ConditionalScriptBreakPoint) {
   f->Call(env->Global(), 0, NULL);
   CHECK_EQ(1, break_point_hit_count);
 
-  ChangeScriptBreakPointConditionFromJS(sbp1, "a % 2 == 0");
+  ChangeScriptBreakPointConditionFromJS(sbp1, "x % 2 == 0");
   break_point_hit_count = 0;
   for (int i = 0; i < 10; i++) {
     f->Call(env->Global(), 0, NULL);
@@ -2021,6 +2066,84 @@ TEST(ScriptBreakPointLine) {
 }
 
 
+// Test top level script break points set on lines.
+TEST(ScriptBreakPointLineTopLevel) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+  env.ExposeDebug();
+
+  v8::Debug::SetDebugEventListener(DebugEventBreakPointHitCount,
+                                   v8::Undefined());
+
+  v8::Local<v8::String> script = v8::String::New(
+    "function f() {\n"
+    "  a = 1;                   // line 1\n"
+    "}\n"
+    "a = 2;                     // line 3\n");
+  v8::Local<v8::Function> f;
+  {
+    v8::HandleScope scope;
+    v8::Script::Compile(script, v8::String::New("test.html"))->Run();
+  }
+  f = v8::Local<v8::Function>::Cast(env->Global()->Get(v8::String::New("f")));
+
+  Heap::CollectAllGarbage(false);
+
+  SetScriptBreakPointByNameFromJS("test.html", 3, -1);
+
+  // Call f and check that there was no break points.
+  break_point_hit_count = 0;
+  f->Call(env->Global(), 0, NULL);
+  CHECK_EQ(0, break_point_hit_count);
+
+  // Recompile and run script and check that break point was hit.
+  break_point_hit_count = 0;
+  v8::Script::Compile(script, v8::String::New("test.html"))->Run();
+  CHECK_EQ(1, break_point_hit_count);
+
+  // Call f and check that there are still no break points.
+  break_point_hit_count = 0;
+  f = v8::Local<v8::Function>::Cast(env->Global()->Get(v8::String::New("f")));
+  CHECK_EQ(0, break_point_hit_count);
+
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
+// Test that it is possible to add and remove break points in a top level
+// function which has no references but has not been collected yet.
+TEST(ScriptBreakPointTopLevelCrash) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+  env.ExposeDebug();
+
+  v8::Debug::SetDebugEventListener(DebugEventBreakPointHitCount,
+                                   v8::Undefined());
+
+  v8::Local<v8::String> script_source = v8::String::New(
+    "function f() {\n"
+    "  return 0;\n"
+    "}\n"
+    "f()");
+
+  int sbp1 = SetScriptBreakPointByNameFromJS("test.html", 3, -1);
+  {
+    v8::HandleScope scope;
+    break_point_hit_count = 0;
+    v8::Script::Compile(script_source, v8::String::New("test.html"))->Run();
+    CHECK_EQ(1, break_point_hit_count);
+  }
+
+  int sbp2 = SetScriptBreakPointByNameFromJS("test.html", 3, -1);
+  ClearBreakPointFromJS(sbp1);
+  ClearBreakPointFromJS(sbp2);
+
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
 // Test that it is possible to remove the last break point for a function
 // inside the break handling of that break point.
 TEST(RemoveBreakPointInBreak) {
@@ -2075,7 +2198,7 @@ TEST(DebuggerStatement) {
 }
 
 
-// Test setting a breakpoint on the  debugger statement.
+// Test setting a breakpoint on the debugger statement.
 TEST(DebuggerStatementBreakpoint) {
     break_point_hit_count = 0;
     v8::HandleScope scope;
@@ -2141,17 +2264,19 @@ TEST(DebugEvaluate) {
   v8::Local<v8::Function> foo = CompileFunction(&env,
     "function foo(x) {"
     "  var a;"
-    "  y=0; /* To ensure break location.*/"
+    "  y=0;"  // To ensure break location 1.
     "  a=x;"
+    "  y=0;"  // To ensure break location 2.
     "}",
     "foo");
-  const int foo_break_position = 15;
+  const int foo_break_position_1 = 15;
+  const int foo_break_position_2 = 29;
 
   // Arguments with one parameter "Hello, world!"
   v8::Handle<v8::Value> argv_foo[1] = { v8::String::New("Hello, world!") };
 
   // Call foo with breakpoint set before a=x and undefined as parameter.
-  int bp = SetBreakPoint(foo, foo_break_position);
+  int bp = SetBreakPoint(foo, foo_break_position_1);
   checks = checks_uu;
   foo->Call(env->Global(), 0, NULL);
 
@@ -2161,7 +2286,7 @@ TEST(DebugEvaluate) {
 
   // Call foo with breakpoint set after a=x and parameter "Hello, world!".
   ClearBreakPoint(bp);
-  SetBreakPoint(foo, foo_break_position + 1);
+  SetBreakPoint(foo, foo_break_position_2);
   checks = checks_hh;
   foo->Call(env->Global(), 1, argv_foo);
 
@@ -2423,6 +2548,9 @@ TEST(DebugStepKeyedLoadLoop) {
   v8::HandleScope scope;
   DebugLocalContext env;
 
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
+
   // Create a function for testing stepping of keyed load. The statement 'y=1'
   // is there to have more than one breakable statement in the loop, TODO(315).
   v8::Local<v8::Function> foo = CompileFunction(
@@ -2448,9 +2576,6 @@ TEST(DebugStepKeyedLoadLoop) {
   v8::Handle<v8::Value> args[kArgc] = { a };
   foo->Call(env->Global(), kArgc, args);
 
-  // Register a debug event listener which steps and counts.
-  v8::Debug::SetDebugEventListener(DebugEventStep);
-
   // Setup break point and step through the function.
   SetBreakPoint(foo, 3);
   step_action = StepNext;
@@ -2458,7 +2583,7 @@ TEST(DebugStepKeyedLoadLoop) {
   foo->Call(env->Global(), kArgc, args);
 
   // With stepping all break locations are hit.
-  CHECK_EQ(22, break_point_hit_count);
+  CHECK_EQ(33, break_point_hit_count);
 
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
@@ -2469,6 +2594,9 @@ TEST(DebugStepKeyedLoadLoop) {
 TEST(DebugStepKeyedStoreLoop) {
   v8::HandleScope scope;
   DebugLocalContext env;
+
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
 
   // Create a function for testing stepping of keyed store. The statement 'y=1'
   // is there to have more than one breakable statement in the loop, TODO(315).
@@ -2494,9 +2622,6 @@ TEST(DebugStepKeyedStoreLoop) {
   v8::Handle<v8::Value> args[kArgc] = { a };
   foo->Call(env->Global(), kArgc, args);
 
-  // Register a debug event listener which steps and counts.
-  v8::Debug::SetDebugEventListener(DebugEventStep);
-
   // Setup break point and step through the function.
   SetBreakPoint(foo, 3);
   step_action = StepNext;
@@ -2504,7 +2629,7 @@ TEST(DebugStepKeyedStoreLoop) {
   foo->Call(env->Global(), kArgc, args);
 
   // With stepping all break locations are hit.
-  CHECK_EQ(22, break_point_hit_count);
+  CHECK_EQ(32, break_point_hit_count);
 
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
@@ -2515,6 +2640,9 @@ TEST(DebugStepKeyedStoreLoop) {
 TEST(DebugStepNamedLoadLoop) {
   v8::HandleScope scope;
   DebugLocalContext env;
+
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
 
   // Create a function for testing stepping of named load.
   v8::Local<v8::Function> foo = CompileFunction(
@@ -2538,9 +2666,6 @@ TEST(DebugStepNamedLoadLoop) {
   // Call function without any break points to ensure inlining is in place.
   foo->Call(env->Global(), 0, NULL);
 
-  // Register a debug event listener which steps and counts.
-  v8::Debug::SetDebugEventListener(DebugEventStep);
-
   // Setup break point and step through the function.
   SetBreakPoint(foo, 4);
   step_action = StepNext;
@@ -2548,7 +2673,7 @@ TEST(DebugStepNamedLoadLoop) {
   foo->Call(env->Global(), 0, NULL);
 
   // With stepping all break locations are hit.
-  CHECK_EQ(41, break_point_hit_count);
+  CHECK_EQ(53, break_point_hit_count);
 
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
@@ -2560,6 +2685,9 @@ TEST(DebugStepLinearMixedICs) {
   v8::HandleScope scope;
   DebugLocalContext env;
 
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
+
   // Create a function for testing stepping.
   v8::Local<v8::Function> foo = CompileFunction(&env,
       "function bar() {};"
@@ -2570,15 +2698,12 @@ TEST(DebugStepLinearMixedICs) {
       "  a=1;b=2;x=a;y[index]=3;x=y[index];bar();}", "foo");
   SetBreakPoint(foo, 0);
 
-  // Register a debug event listener which steps and counts.
-  v8::Debug::SetDebugEventListener(DebugEventStep);
-
   step_action = StepIn;
   break_point_hit_count = 0;
   foo->Call(env->Global(), 0, NULL);
 
   // With stepping all break locations are hit.
-  CHECK_EQ(8, break_point_hit_count);
+  CHECK_EQ(11, break_point_hit_count);
 
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
@@ -2593,6 +2718,66 @@ TEST(DebugStepLinearMixedICs) {
   // Without stepping only active break points are hit.
   CHECK_EQ(1, break_point_hit_count);
 
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
+TEST(DebugStepDeclarations) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
+
+  // Create a function for testing stepping.
+  const char* src = "function foo() { "
+                    "  var a;"
+                    "  var b = 1;"
+                    "  var c = foo;"
+                    "  var d = Math.floor;"
+                    "  var e = b + d(1.2);"
+                    "}";
+  v8::Local<v8::Function> foo = CompileFunction(&env, src, "foo");
+  SetBreakPoint(foo, 0);
+
+  // Stepping through the declarations.
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  foo->Call(env->Global(), 0, NULL);
+  CHECK_EQ(6, break_point_hit_count);
+
+  // Get rid of the debug event listener.
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
+TEST(DebugStepLocals) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
+
+  // Create a function for testing stepping.
+  const char* src = "function foo() { "
+                    "  var a,b;"
+                    "  a = 1;"
+                    "  b = a + 2;"
+                    "  b = 1 + 2 + 3;"
+                    "  a = Math.floor(b);"
+                    "}";
+  v8::Local<v8::Function> foo = CompileFunction(&env, src, "foo");
+  SetBreakPoint(foo, 0);
+
+  // Stepping through the declarations.
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  foo->Call(env->Global(), 0, NULL);
+  CHECK_EQ(6, break_point_hit_count);
+
+  // Get rid of the debug event listener.
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
 }
@@ -2624,14 +2809,14 @@ TEST(DebugStepIf) {
   break_point_hit_count = 0;
   v8::Handle<v8::Value> argv_true[argc] = { v8::True() };
   foo->Call(env->Global(), argc, argv_true);
-  CHECK_EQ(3, break_point_hit_count);
+  CHECK_EQ(4, break_point_hit_count);
 
   // Stepping through the false part.
   step_action = StepIn;
   break_point_hit_count = 0;
   v8::Handle<v8::Value> argv_false[argc] = { v8::False() };
   foo->Call(env->Global(), argc, argv_false);
-  CHECK_EQ(4, break_point_hit_count);
+  CHECK_EQ(5, break_point_hit_count);
 
   // Get rid of the debug event listener.
   v8::Debug::SetDebugEventListener(NULL);
@@ -2659,6 +2844,7 @@ TEST(DebugStepSwitch) {
                     "    case 3:"
                     "      d = 1;"
                     "      e = 1;"
+                    "      f = 1;"
                     "      break;"
                     "  }"
                     "}";
@@ -2670,21 +2856,97 @@ TEST(DebugStepSwitch) {
   break_point_hit_count = 0;
   v8::Handle<v8::Value> argv_1[argc] = { v8::Number::New(1) };
   foo->Call(env->Global(), argc, argv_1);
-  CHECK_EQ(4, break_point_hit_count);
+  CHECK_EQ(6, break_point_hit_count);
 
   // Another case.
   step_action = StepIn;
   break_point_hit_count = 0;
   v8::Handle<v8::Value> argv_2[argc] = { v8::Number::New(2) };
   foo->Call(env->Global(), argc, argv_2);
-  CHECK_EQ(3, break_point_hit_count);
+  CHECK_EQ(5, break_point_hit_count);
 
   // Last case.
   step_action = StepIn;
   break_point_hit_count = 0;
   v8::Handle<v8::Value> argv_3[argc] = { v8::Number::New(3) };
   foo->Call(env->Global(), argc, argv_3);
-  CHECK_EQ(4, break_point_hit_count);
+  CHECK_EQ(7, break_point_hit_count);
+
+  // Get rid of the debug event listener.
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
+TEST(DebugStepWhile) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
+
+  // Create a function for testing stepping.
+  const int argc = 1;
+  const char* src = "function foo(x) { "
+                    "  var a = 0;"
+                    "  while (a < x) {"
+                    "    a++;"
+                    "  }"
+                    "}";
+  v8::Local<v8::Function> foo = CompileFunction(&env, src, "foo");
+  SetBreakPoint(foo, 8);  // "var a = 0;"
+
+  // Looping 10 times.
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  v8::Handle<v8::Value> argv_10[argc] = { v8::Number::New(10) };
+  foo->Call(env->Global(), argc, argv_10);
+  CHECK_EQ(23, break_point_hit_count);
+
+  // Looping 100 times.
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  v8::Handle<v8::Value> argv_100[argc] = { v8::Number::New(100) };
+  foo->Call(env->Global(), argc, argv_100);
+  CHECK_EQ(203, break_point_hit_count);
+
+  // Get rid of the debug event listener.
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
+TEST(DebugStepDoWhile) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
+
+  // Create a function for testing stepping.
+  const int argc = 1;
+  const char* src = "function foo(x) { "
+                    "  var a = 0;"
+                    "  do {"
+                    "    a++;"
+                    "  } while (a < x)"
+                    "}";
+  v8::Local<v8::Function> foo = CompileFunction(&env, src, "foo");
+  SetBreakPoint(foo, 8);  // "var a = 0;"
+
+  // Looping 10 times.
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  v8::Handle<v8::Value> argv_10[argc] = { v8::Number::New(10) };
+  foo->Call(env->Global(), argc, argv_10);
+  CHECK_EQ(22, break_point_hit_count);
+
+  // Looping 100 times.
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  v8::Handle<v8::Value> argv_100[argc] = { v8::Number::New(100) };
+  foo->Call(env->Global(), argc, argv_100);
+  CHECK_EQ(202, break_point_hit_count);
 
   // Get rid of the debug event listener.
   v8::Debug::SetDebugEventListener(NULL);
@@ -2723,6 +2985,210 @@ TEST(DebugStepFor) {
   v8::Handle<v8::Value> argv_100[argc] = { v8::Number::New(100) };
   foo->Call(env->Global(), argc, argv_100);
   CHECK_EQ(203, break_point_hit_count);
+
+  // Get rid of the debug event listener.
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
+TEST(DebugStepForContinue) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
+
+  // Create a function for testing stepping.
+  const int argc = 1;
+  const char* src = "function foo(x) { "
+                    "  var a = 0;"
+                    "  var b = 0;"
+                    "  var c = 0;"
+                    "  for (var i = 0; i < x; i++) {"
+                    "    a++;"
+                    "    if (a % 2 == 0) continue;"
+                    "    b++;"
+                    "    c++;"
+                    "  }"
+                    "  return b;"
+                    "}";
+  v8::Local<v8::Function> foo = CompileFunction(&env, src, "foo");
+  v8::Handle<v8::Value> result;
+  SetBreakPoint(foo, 8);  // "var a = 0;"
+
+  // Each loop generates 4 or 5 steps depending on whether a is equal.
+
+  // Looping 10 times.
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  v8::Handle<v8::Value> argv_10[argc] = { v8::Number::New(10) };
+  result = foo->Call(env->Global(), argc, argv_10);
+  CHECK_EQ(5, result->Int32Value());
+  CHECK_EQ(50, break_point_hit_count);
+
+  // Looping 100 times.
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  v8::Handle<v8::Value> argv_100[argc] = { v8::Number::New(100) };
+  result = foo->Call(env->Global(), argc, argv_100);
+  CHECK_EQ(50, result->Int32Value());
+  CHECK_EQ(455, break_point_hit_count);
+
+  // Get rid of the debug event listener.
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
+TEST(DebugStepForBreak) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
+
+  // Create a function for testing stepping.
+  const int argc = 1;
+  const char* src = "function foo(x) { "
+                    "  var a = 0;"
+                    "  var b = 0;"
+                    "  var c = 0;"
+                    "  for (var i = 0; i < 1000; i++) {"
+                    "    a++;"
+                    "    if (a == x) break;"
+                    "    b++;"
+                    "    c++;"
+                    "  }"
+                    "  return b;"
+                    "}";
+  v8::Local<v8::Function> foo = CompileFunction(&env, src, "foo");
+  v8::Handle<v8::Value> result;
+  SetBreakPoint(foo, 8);  // "var a = 0;"
+
+  // Each loop generates 5 steps except for the last (when break is executed)
+  // which only generates 4.
+
+  // Looping 10 times.
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  v8::Handle<v8::Value> argv_10[argc] = { v8::Number::New(10) };
+  result = foo->Call(env->Global(), argc, argv_10);
+  CHECK_EQ(9, result->Int32Value());
+  CHECK_EQ(53, break_point_hit_count);
+
+  // Looping 100 times.
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  v8::Handle<v8::Value> argv_100[argc] = { v8::Number::New(100) };
+  result = foo->Call(env->Global(), argc, argv_100);
+  CHECK_EQ(99, result->Int32Value());
+  CHECK_EQ(503, break_point_hit_count);
+
+  // Get rid of the debug event listener.
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
+TEST(DebugStepForIn) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
+
+  v8::Local<v8::Function> foo;
+  const char* src_1 = "function foo() { "
+                      "  var a = [1, 2];"
+                      "  for (x in a) {"
+                      "    b = 0;"
+                      "  }"
+                      "}";
+  foo = CompileFunction(&env, src_1, "foo");
+  SetBreakPoint(foo, 0);  // "var a = ..."
+
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  foo->Call(env->Global(), 0, NULL);
+  CHECK_EQ(6, break_point_hit_count);
+
+  const char* src_2 = "function foo() { "
+                      "  var a = {a:[1, 2, 3]};"
+                      "  for (x in a.a) {"
+                      "    b = 0;"
+                      "  }"
+                      "}";
+  foo = CompileFunction(&env, src_2, "foo");
+  SetBreakPoint(foo, 0);  // "var a = ..."
+
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  foo->Call(env->Global(), 0, NULL);
+  CHECK_EQ(8, break_point_hit_count);
+
+  // Get rid of the debug event listener.
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
+TEST(DebugStepWith) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
+
+  // Create a function for testing stepping.
+  const char* src = "function foo(x) { "
+                    "  var a = {};"
+                    "  with (a) {}"
+                    "  with (b) {}"
+                    "}";
+  env->Global()->Set(v8::String::New("b"), v8::Object::New());
+  v8::Local<v8::Function> foo = CompileFunction(&env, src, "foo");
+  v8::Handle<v8::Value> result;
+  SetBreakPoint(foo, 8);  // "var a = {};"
+
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  foo->Call(env->Global(), 0, NULL);
+  CHECK_EQ(4, break_point_hit_count);
+
+  // Get rid of the debug event listener.
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
+TEST(DebugConditional) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+
+  // Register a debug event listener which steps and counts.
+  v8::Debug::SetDebugEventListener(DebugEventStep);
+
+  // Create a function for testing stepping.
+  const char* src = "function foo(x) { "
+                    "  var a;"
+                    "  a = x ? 1 : 2;"
+                    "  return a;"
+                    "}";
+  v8::Local<v8::Function> foo = CompileFunction(&env, src, "foo");
+  SetBreakPoint(foo, 0);  // "var a;"
+
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  foo->Call(env->Global(), 0, NULL);
+  CHECK_EQ(5, break_point_hit_count);
+
+  step_action = StepIn;
+  break_point_hit_count = 0;
+  const int argc = 1;
+  v8::Handle<v8::Value> argv_true[argc] = { v8::True() };
+  foo->Call(env->Global(), argc, argv_true);
+  CHECK_EQ(5, break_point_hit_count);
 
   // Get rid of the debug event listener.
   v8::Debug::SetDebugEventListener(NULL);
@@ -2851,7 +3317,7 @@ TEST(StepInOutBranch) {
   // Step through invocation of a.
   step_action = StepIn;
   break_point_hit_count = 0;
-  expected_step_sequence = "abaca";
+  expected_step_sequence = "abbaca";
   a->Call(env->Global(), 0, NULL);
   CHECK_EQ(StrLength(expected_step_sequence),
            break_point_hit_count);
@@ -2920,7 +3386,7 @@ TEST(DebugStepFunctionApply) {
   foo->Call(env->Global(), 0, NULL);
 
   // With stepping all break locations are hit.
-  CHECK_EQ(6, break_point_hit_count);
+  CHECK_EQ(7, break_point_hit_count);
 
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
@@ -2964,14 +3430,14 @@ TEST(DebugStepFunctionCall) {
   // Check stepping where the if condition in bar is false.
   break_point_hit_count = 0;
   foo->Call(env->Global(), 0, NULL);
-  CHECK_EQ(4, break_point_hit_count);
+  CHECK_EQ(6, break_point_hit_count);
 
   // Check stepping where the if condition in bar is true.
   break_point_hit_count = 0;
   const int argc = 1;
   v8::Handle<v8::Value> argv[argc] = { v8::True() };
   foo->Call(env->Global(), argc, argv);
-  CHECK_EQ(6, break_point_hit_count);
+  CHECK_EQ(8, break_point_hit_count);
 
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
@@ -3264,14 +3730,13 @@ TEST(StepWithException) {
   b->Call(env->Global(), 0, NULL);
   CHECK_EQ(StrLength(expected_step_sequence),
            break_point_hit_count);
-
   // Step through invocation of d + e.
   v8::Local<v8::Function> d = CompileFunction(&env, src, "d");
   SetBreakPoint(d, 0);
   ChangeBreakOnException(false, true);
   step_action = StepIn;
   break_point_hit_count = 0;
-  expected_step_sequence = "dded";
+  expected_step_sequence = "ddedd";
   d->Call(env->Global(), 0, NULL);
   CHECK_EQ(StrLength(expected_step_sequence),
            break_point_hit_count);
@@ -3280,7 +3745,7 @@ TEST(StepWithException) {
   ChangeBreakOnException(true, true);
   step_action = StepIn;
   break_point_hit_count = 0;
-  expected_step_sequence = "ddeed";
+  expected_step_sequence = "ddeedd";
   d->Call(env->Global(), 0, NULL);
   CHECK_EQ(StrLength(expected_step_sequence),
            break_point_hit_count);
@@ -3291,7 +3756,7 @@ TEST(StepWithException) {
   ChangeBreakOnException(false, true);
   step_action = StepIn;
   break_point_hit_count = 0;
-  expected_step_sequence = "ffghf";
+  expected_step_sequence = "ffghhff";
   f->Call(env->Global(), 0, NULL);
   CHECK_EQ(StrLength(expected_step_sequence),
            break_point_hit_count);
@@ -3300,7 +3765,7 @@ TEST(StepWithException) {
   ChangeBreakOnException(true, true);
   step_action = StepIn;
   break_point_hit_count = 0;
-  expected_step_sequence = "ffghhf";
+  expected_step_sequence = "ffghhhff";
   f->Call(env->Global(), 0, NULL);
   CHECK_EQ(StrLength(expected_step_sequence),
            break_point_hit_count);
@@ -6221,3 +6686,69 @@ TEST(DebugEventContext) {
   CheckDebuggerUnloaded();
 }
 
+
+static void* expected_break_data;
+static bool was_debug_break_called;
+static bool was_debug_event_called;
+static void DebugEventBreakDataChecker(const v8::Debug::EventDetails& details) {
+  if (details.GetEvent() == v8::BreakForCommand) {
+    CHECK_EQ(expected_break_data, details.GetClientData());
+    was_debug_event_called = true;
+  } else if (details.GetEvent() == v8::Break) {
+    was_debug_break_called = true;
+  }
+}
+
+// Check that event details contain context where debug event occured.
+TEST(DebugEventBreakData) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+  v8::Debug::SetDebugEventListener2(DebugEventBreakDataChecker);
+
+  TestClientData::constructor_call_counter = 0;
+  TestClientData::destructor_call_counter = 0;
+
+  expected_break_data = NULL;
+  was_debug_event_called = false;
+  was_debug_break_called = false;
+  v8::Debug::DebugBreakForCommand();
+  v8::Script::Compile(v8::String::New("(function(x){return x;})(1);"))->Run();
+  CHECK(was_debug_event_called);
+  CHECK(!was_debug_break_called);
+
+  TestClientData* data1 = new TestClientData();
+  expected_break_data = data1;
+  was_debug_event_called = false;
+  was_debug_break_called = false;
+  v8::Debug::DebugBreakForCommand(data1);
+  v8::Script::Compile(v8::String::New("(function(x){return x+1;})(1);"))->Run();
+  CHECK(was_debug_event_called);
+  CHECK(!was_debug_break_called);
+
+  expected_break_data = NULL;
+  was_debug_event_called = false;
+  was_debug_break_called = false;
+  v8::Debug::DebugBreak();
+  v8::Script::Compile(v8::String::New("(function(x){return x+2;})(1);"))->Run();
+  CHECK(!was_debug_event_called);
+  CHECK(was_debug_break_called);
+
+  TestClientData* data2 = new TestClientData();
+  expected_break_data = data2;
+  was_debug_event_called = false;
+  was_debug_break_called = false;
+  v8::Debug::DebugBreak();
+  v8::Debug::DebugBreakForCommand(data2);
+  v8::Script::Compile(v8::String::New("(function(x){return x+3;})(1);"))->Run();
+  CHECK(was_debug_event_called);
+  CHECK(was_debug_break_called);
+
+  CHECK_EQ(2, TestClientData::constructor_call_counter);
+  CHECK_EQ(TestClientData::constructor_call_counter,
+           TestClientData::destructor_call_counter);
+
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+#endif  // ENABLE_DEBUGGER_SUPPORT

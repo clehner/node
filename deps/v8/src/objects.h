@@ -39,7 +39,7 @@
 #endif
 
 //
-// All object types in the V8 JavaScript are described in this file.
+// Most object types in the V8 JavaScript are described in this file.
 //
 // Inheritance hierarchy:
 //   - Object
@@ -74,8 +74,8 @@
 //           - CodeCacheHashTable
 //           - MapCache
 //         - Context
-//         - GlobalContext
 //         - JSFunctionResultCache
+//         - SerializedScopeInfo
 //       - String
 //         - SeqString
 //           - SeqAsciiString
@@ -320,6 +320,10 @@ enum PropertyNormalizationMode {
     ExternalTwoByteString::kSize,                                              \
     external_symbol,                                                           \
     ExternalSymbol)                                                            \
+  V(EXTERNAL_SYMBOL_WITH_ASCII_DATA_TYPE,                                      \
+    ExternalTwoByteString::kSize,                                              \
+    external_symbol_with_ascii_data,                                           \
+    ExternalSymbolWithAsciiData)                                               \
   V(EXTERNAL_ASCII_SYMBOL_TYPE,                                                \
     ExternalAsciiString::kSize,                                                \
     external_ascii_symbol,                                                     \
@@ -344,6 +348,10 @@ enum PropertyNormalizationMode {
     ExternalTwoByteString::kSize,                                              \
     external_string,                                                           \
     ExternalString)                                                            \
+  V(EXTERNAL_STRING_WITH_ASCII_DATA_TYPE,                                      \
+    ExternalTwoByteString::kSize,                                              \
+    external_string_with_ascii_data,                                           \
+    ExternalStringWithAsciiData)                                               \
   V(EXTERNAL_ASCII_STRING_TYPE,                                                \
     ExternalAsciiString::kSize,                                                \
     external_ascii_string,                                                     \
@@ -408,9 +416,14 @@ const uint32_t kStringRepresentationMask = 0x03;
 enum StringRepresentationTag {
   kSeqStringTag = 0x0,
   kConsStringTag = 0x1,
-  kExternalStringTag = 0x3
+  kExternalStringTag = 0x2
 };
 const uint32_t kIsConsStringMask = 0x1;
+
+// If bit 7 is clear, then bit 3 indicates whether this two-byte
+// string actually contains ascii data.
+const uint32_t kAsciiDataHintMask = 0x08;
+const uint32_t kAsciiDataHintTag = 0x08;
 
 
 // A ConsString with an empty string as the right side is a candidate
@@ -427,18 +440,22 @@ const uint32_t kShortcutTypeTag = kConsStringTag;
 
 enum InstanceType {
   // String types.
-  SYMBOL_TYPE = kSymbolTag | kSeqStringTag,
+  SYMBOL_TYPE = kTwoByteStringTag | kSymbolTag | kSeqStringTag,
   ASCII_SYMBOL_TYPE = kAsciiStringTag | kSymbolTag | kSeqStringTag,
-  CONS_SYMBOL_TYPE = kSymbolTag | kConsStringTag,
+  CONS_SYMBOL_TYPE = kTwoByteStringTag | kSymbolTag | kConsStringTag,
   CONS_ASCII_SYMBOL_TYPE = kAsciiStringTag | kSymbolTag | kConsStringTag,
-  EXTERNAL_SYMBOL_TYPE = kSymbolTag | kExternalStringTag,
+  EXTERNAL_SYMBOL_TYPE = kTwoByteStringTag | kSymbolTag | kExternalStringTag,
+  EXTERNAL_SYMBOL_WITH_ASCII_DATA_TYPE =
+      kTwoByteStringTag | kSymbolTag | kExternalStringTag | kAsciiDataHintTag,
   EXTERNAL_ASCII_SYMBOL_TYPE =
       kAsciiStringTag | kSymbolTag | kExternalStringTag,
-  STRING_TYPE = kSeqStringTag,
+  STRING_TYPE = kTwoByteStringTag | kSeqStringTag,
   ASCII_STRING_TYPE = kAsciiStringTag | kSeqStringTag,
-  CONS_STRING_TYPE = kConsStringTag,
+  CONS_STRING_TYPE = kTwoByteStringTag | kConsStringTag,
   CONS_ASCII_STRING_TYPE = kAsciiStringTag | kConsStringTag,
-  EXTERNAL_STRING_TYPE = kExternalStringTag,
+  EXTERNAL_STRING_TYPE = kTwoByteStringTag | kExternalStringTag,
+  EXTERNAL_STRING_WITH_ASCII_DATA_TYPE =
+      kTwoByteStringTag | kExternalStringTag | kAsciiDataHintTag,
   EXTERNAL_ASCII_STRING_TYPE = kAsciiStringTag | kExternalStringTag,
   PRIVATE_EXTERNAL_ASCII_STRING_TYPE = EXTERNAL_ASCII_STRING_TYPE,
 
@@ -474,10 +491,12 @@ enum InstanceType {
   TYPE_SWITCH_INFO_TYPE,
   SCRIPT_TYPE,
   CODE_CACHE_TYPE,
-#ifdef ENABLE_DEBUGGER_SUPPORT
+  // The following two instance types are only used when ENABLE_DEBUGGER_SUPPORT
+  // is defined. However as include/v8.h contain some of the instance type
+  // constants always having them avoids them getting different numbers
+  // depending on whether ENABLE_DEBUGGER_SUPPORT is defined or not.
   DEBUG_INFO_TYPE,
   BREAK_POINT_INFO_TYPE,
-#endif
 
   FIXED_ARRAY_TYPE,
   SHARED_FUNCTION_INFO_TYPE,
@@ -509,6 +528,11 @@ enum InstanceType {
   FIRST_JS_OBJECT_TYPE = JS_VALUE_TYPE,
   LAST_JS_OBJECT_TYPE = JS_REGEXP_TYPE
 };
+
+
+STATIC_CHECK(JS_OBJECT_TYPE == Internals::kJSObjectType);
+STATIC_CHECK(FIRST_NONSTRING_TYPE == Internals::kFirstNonstringType);
+STATIC_CHECK(PROXY_TYPE == Internals::kProxyType);
 
 
 enum CompareResult {
@@ -1123,7 +1147,7 @@ class HeapNumber: public HeapObject {
   static const uint32_t kExponentMask = 0x7ff00000u;
   static const uint32_t kMantissaMask = 0xfffffu;
   static const int kMantissaBits = 52;
-  static const int KExponentBits = 11;
+  static const int kExponentBits = 11;
   static const int kExponentBias = 1023;
   static const int kExponentShift = 20;
   static const int kMantissaBitsInTopWord = 20;
@@ -1167,6 +1191,7 @@ class JSObject: public HeapObject {
   // case, and a PixelArray or ExternalArray in special cases.
   DECL_ACCESSORS(elements, HeapObject)
   inline void initialize_elements();
+  inline Object* ResetElements();
   inline ElementsKind GetElementsKind();
   inline bool HasFastElements();
   inline bool HasDictionaryElements();
@@ -1342,8 +1367,9 @@ class JSObject: public HeapObject {
   // Returns the index'th element.
   // The undefined object if index is out of bounds.
   Object* GetElementWithReceiver(JSObject* receiver, uint32_t index);
+  Object* GetElementWithInterceptor(JSObject* receiver, uint32_t index);
 
-  void SetFastElements(FixedArray* elements);
+  Object* SetFastElementsCapacityAndLength(int capacity, int length);
   Object* SetSlowElements(Object* length);
 
   // Lookup interceptors are used for handling properties controlled by host
@@ -1491,6 +1517,10 @@ class JSObject: public HeapObject {
   // Casting.
   static inline JSObject* cast(Object* obj);
 
+  // Disalow further properties to be added to the object.
+  Object* PreventExtensions();
+
+
   // Dispatched behavior.
   void JSObjectIterateBody(int object_size, ObjectVisitor* v);
   void JSObjectShortPrint(StringStream* accumulator);
@@ -1522,6 +1552,11 @@ class JSObject: public HeapObject {
 #endif
   Object* SlowReverseLookup(Object* value);
 
+  // Maximal number of fast properties for the JSObject. Used to
+  // restrict the number of map transitions to avoid an explosion in
+  // the number of maps for objects used as dictionaries.
+  inline int MaxFastProperties();
+
   // Maximal number of elements (numbered 0 .. kMaxElementCount - 1).
   // Also maximal value of JSArray's length property.
   static const uint32_t kMaxElementCount = 0xffffffffu;
@@ -1542,8 +1577,6 @@ class JSObject: public HeapObject {
   static const int kHeaderSize = kElementsOffset + kPointerSize;
 
   STATIC_CHECK(kHeaderSize == Internals::kJSObjectHeaderSize);
-
-  Object* GetElementWithInterceptor(JSObject* receiver, uint32_t index);
 
  private:
   Object* GetElementWithCallback(Object* receiver,
@@ -1979,7 +2012,7 @@ class HashTable: public FixedArray {
   static const int kMaxCapacity =
       (FixedArray::kMaxLength - kElementsStartOffset) / kEntrySize;
 
-  // Find entry for key otherwise return -1.
+  // Find entry for key otherwise return kNotFound.
   int FindEntry(Key key);
 
  protected:
@@ -2151,6 +2184,11 @@ class Dictionary: public HashTable<Shape, Key> {
 
   // Set the value for entry.
   void ValueAtPut(int entry, Object* value) {
+    // Check that this value can actually be written.
+    PropertyDetails details = DetailsAt(entry);
+    // If a value has not been initilized we allow writing to it even if
+    // it is read only (a declared const that has not been initialized).
+    if (details.IsReadOnly() && !ValueAt(entry)->IsTheHole()) return;
     this->set(HashTable<Shape, Key>::EntryToIndex(entry)+1, value);
   }
 
@@ -2256,6 +2294,10 @@ class StringDictionary: public Dictionary<StringDictionaryShape, String*> {
   // For transforming properties of a JSObject.
   Object* TransformPropertiesToFastFor(JSObject* obj,
                                        int unused_property_fields);
+
+  // Find entry for key otherwise return kNotFound. Optimzed version of
+  // HashTable::FindEntry.
+  int FindEntry(String* key);
 };
 
 
@@ -2669,6 +2711,7 @@ class Code: public HeapObject {
     LOAD_IC,
     KEYED_LOAD_IC,
     CALL_IC,
+    KEYED_CALL_IC,
     STORE_IC,
     KEYED_STORE_IC,
     BINARY_OP_IC,
@@ -2682,7 +2725,7 @@ class Code: public HeapObject {
   };
 
   enum {
-    NUMBER_OF_KINDS = KEYED_STORE_IC + 1
+    NUMBER_OF_KINDS = LAST_IC_KIND + 1
   };
 
 #ifdef ENABLE_DISASSEMBLER
@@ -2697,13 +2740,13 @@ class Code: public HeapObject {
   inline int instruction_size();
   inline void set_instruction_size(int value);
 
-  // [relocation_size]: Size of relocation information.
-  inline int relocation_size();
-  inline void set_relocation_size(int value);
+  // [relocation_info]: Code relocation information
+  DECL_ACCESSORS(relocation_info, ByteArray)
 
-  // [sinfo_size]: Size of scope information.
-  inline int sinfo_size();
-  inline void set_sinfo_size(int value);
+  // Unchecked accessor to be used during GC.
+  inline ByteArray* unchecked_relocation_info();
+
+  inline int relocation_size();
 
   // [flags]: Various code flags.
   inline Flags flags();
@@ -2723,6 +2766,7 @@ class Code: public HeapObject {
   inline bool is_store_stub() { return kind() == STORE_IC; }
   inline bool is_keyed_store_stub() { return kind() == KEYED_STORE_IC; }
   inline bool is_call_stub() { return kind() == CALL_IC; }
+  inline bool is_keyed_call_stub() { return kind() == KEYED_CALL_IC; }
 
   // [major_key]: For kind STUB or BINARY_OP_IC, the major key.
   inline CodeStub::Major major_key();
@@ -2733,11 +2777,13 @@ class Code: public HeapObject {
                                    InLoopFlag in_loop = NOT_IN_LOOP,
                                    InlineCacheState ic_state = UNINITIALIZED,
                                    PropertyType type = NORMAL,
-                                   int argc = -1);
+                                   int argc = -1,
+                                   InlineCacheHolderFlag holder = OWN_MAP);
 
   static inline Flags ComputeMonomorphicFlags(
       Kind kind,
       PropertyType type,
+      InlineCacheHolderFlag holder = OWN_MAP,
       InLoopFlag in_loop = NOT_IN_LOOP,
       int argc = -1);
 
@@ -2746,6 +2792,7 @@ class Code: public HeapObject {
   static inline InLoopFlag ExtractICInLoopFromFlags(Flags flags);
   static inline PropertyType ExtractTypeFromFlags(Flags flags);
   static inline int ExtractArgumentsCountFromFlags(Flags flags);
+  static inline InlineCacheHolderFlag ExtractCacheHolderFromFlags(Flags flags);
   static inline Flags RemoveTypeFromFlags(Flags flags);
 
   // Convert a target address into a code object.
@@ -2753,6 +2800,9 @@ class Code: public HeapObject {
 
   // Returns the address of the first instruction.
   inline byte* instruction_start();
+
+  // Returns the address right after the last instruction.
+  inline byte* instruction_end();
 
   // Returns the size of the instructions, padding, and relocation information.
   inline int body_size();
@@ -2766,9 +2816,6 @@ class Code: public HeapObject {
   // Returns true if pc is inside this object's instructions.
   inline bool contains(byte* pc);
 
-  // Returns the address of the scope information.
-  inline byte* sinfo_start();
-
   // Relocate the code by delta bytes. Called to signal that this code
   // object has been moved by delta bytes.
   void Relocate(intptr_t delta);
@@ -2776,12 +2823,10 @@ class Code: public HeapObject {
   // Migrate code described by desc.
   void CopyFrom(const CodeDesc& desc);
 
-  // Returns the object size for a given body and sinfo size (Used for
-  // allocation).
-  static int SizeFor(int body_size, int sinfo_size) {
+  // Returns the object size for a given body (used for allocation).
+  static int SizeFor(int body_size) {
     ASSERT_SIZE_TAG_ALIGNED(body_size);
-    ASSERT_SIZE_TAG_ALIGNED(sinfo_size);
-    return RoundUp(kHeaderSize + body_size + sinfo_size, kCodeAlignment);
+    return RoundUp(kHeaderSize + body_size, kCodeAlignment);
   }
 
   // Calculate the size of the code object to report for log events. This takes
@@ -2801,7 +2846,7 @@ class Code: public HeapObject {
   static inline Code* cast(Object* obj);
 
   // Dispatched behavior.
-  int CodeSize() { return SizeFor(body_size(), sinfo_size()); }
+  int CodeSize() { return SizeFor(body_size()); }
   void CodeIterateBody(ObjectVisitor* v);
 #ifdef DEBUG
   void CodePrint();
@@ -2814,9 +2859,8 @@ class Code: public HeapObject {
 
   // Layout description.
   static const int kInstructionSizeOffset = HeapObject::kHeaderSize;
-  static const int kRelocationSizeOffset = kInstructionSizeOffset + kIntSize;
-  static const int kSInfoSizeOffset = kRelocationSizeOffset + kIntSize;
-  static const int kFlagsOffset = kSInfoSizeOffset + kIntSize;
+  static const int kRelocationInfoOffset = kInstructionSizeOffset + kIntSize;
+  static const int kFlagsOffset = kRelocationInfoOffset + kPointerSize;
   static const int kKindSpecificFlagsOffset  = kFlagsOffset + kIntSize;
   // Add padding to align the instruction start following right after
   // the Code object header.
@@ -2830,23 +2874,26 @@ class Code: public HeapObject {
   // Flags layout.
   static const int kFlagsICStateShift        = 0;
   static const int kFlagsICInLoopShift       = 3;
-  static const int kFlagsKindShift           = 4;
-  static const int kFlagsTypeShift           = 8;
-  static const int kFlagsArgumentsCountShift = 11;
+  static const int kFlagsTypeShift           = 4;
+  static const int kFlagsKindShift           = 7;
+  static const int kFlagsICHolderShift       = 11;
+  static const int kFlagsArgumentsCountShift = 12;
 
   static const int kFlagsICStateMask        = 0x00000007;  // 00000000111
   static const int kFlagsICInLoopMask       = 0x00000008;  // 00000001000
-  static const int kFlagsKindMask           = 0x000000F0;  // 00011110000
-  static const int kFlagsTypeMask           = 0x00000700;  // 11100000000
-  static const int kFlagsArgumentsCountMask = 0xFFFFF800;
+  static const int kFlagsTypeMask           = 0x00000070;  // 00001110000
+  static const int kFlagsKindMask           = 0x00000780;  // 11110000000
+  static const int kFlagsCacheInPrototypeMapMask = 0x00000800;
+  static const int kFlagsArgumentsCountMask = 0xFFFFF000;
 
   static const int kFlagsNotUsedInLookup =
-      (kFlagsICInLoopMask | kFlagsTypeMask);
+      (kFlagsICInLoopMask | kFlagsTypeMask | kFlagsCacheInPrototypeMapMask);
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(Code);
 };
 
+typedef void (*Scavenger)(Map* map, HeapObject** slot, HeapObject* object);
 
 // All heap objects have a Map that describes their structure.
 //  A Map contains information about:
@@ -2948,12 +2995,20 @@ class Map: public HeapObject {
     return ((1 << kHasInstanceCallHandler) & bit_field()) != 0;
   }
 
-  inline void set_is_extensible() {
-    set_bit_field2(bit_field2() | (1 << kIsExtensible));
+  inline void set_is_extensible(bool value);
+  inline bool is_extensible();
+
+  // Tells whether the instance has fast elements.
+  void set_has_fast_elements(bool value) {
+    if (value) {
+      set_bit_field2(bit_field2() | (1 << kHasFastElements));
+    } else {
+      set_bit_field2(bit_field2() & ~(1 << kHasFastElements));
+    }
   }
 
-  inline bool is_extensible() {
-    return ((1 << kIsExtensible) & bit_field2()) != 0;
+  bool has_fast_elements() {
+    return ((1 << kHasFastElements) & bit_field2()) != 0;
   }
 
   // Tells whether the instance needs security checks when accessing its
@@ -2978,6 +3033,16 @@ class Map: public HeapObject {
   // Returns a copy of the map, with all transitions dropped from the
   // instance descriptors.
   Object* CopyDropTransitions();
+
+  // Returns this map if it has the fast elements bit set, otherwise
+  // returns a copy of the map, with all transitions dropped from the
+  // descriptors and the fast elements bit set.
+  inline Object* GetFastElementsMap();
+
+  // Returns this map if it has the fast elements bit cleared,
+  // otherwise returns a copy of the map, with all transitions dropped
+  // from the descriptors and the fast elements bit cleared.
+  inline Object* GetSlowElementsMap();
 
   // Returns the property index for name (only valid for FAST MODE).
   int PropertyIndexFor(String* name);
@@ -3030,6 +3095,13 @@ class Map: public HeapObject {
   void MapVerify();
 #endif
 
+  inline Scavenger scavenger();
+  inline void set_scavenger(Scavenger callback);
+
+  inline void Scavenge(HeapObject** slot, HeapObject* obj) {
+    scavenger()(this, slot, obj);
+  }
+
   static const int kMaxPreAllocatedPropertyFields = 255;
 
   // Layout description.
@@ -3040,7 +3112,8 @@ class Map: public HeapObject {
   static const int kInstanceDescriptorsOffset =
       kConstructorOffset + kPointerSize;
   static const int kCodeCacheOffset = kInstanceDescriptorsOffset + kPointerSize;
-  static const int kPadStart = kCodeCacheOffset + kPointerSize;
+  static const int kScavengerCallbackOffset = kCodeCacheOffset + kPointerSize;
+  static const int kPadStart = kScavengerCallbackOffset + kPointerSize;
   static const int kSize = MAP_POINTER_ALIGN(kPadStart);
 
   // Layout of pointer fields. Heap iteration code relies on them
@@ -3080,6 +3153,7 @@ class Map: public HeapObject {
   // Bit positions for bit field 2
   static const int kIsExtensible = 0;
   static const int kFunctionWithPrototype = 1;
+  static const int kHasFastElements = 2;
 
   // Layout of the default cache. It holds alternating name and code objects.
   static const int kCodeCacheEntrySize = 2;
@@ -3202,6 +3276,9 @@ class SharedFunctionInfo: public HeapObject {
   // [code]: Function code.
   DECL_ACCESSORS(code, Code)
 
+  // [scope_info]: Scope info.
+  DECL_ACCESSORS(scope_info, SerializedScopeInfo)
+
   // [construct stub]: Code stub for constructing instances of this function.
   DECL_ACCESSORS(construct_stub, Code)
 
@@ -3306,6 +3383,12 @@ class SharedFunctionInfo: public HeapObject {
   inline bool try_full_codegen();
   inline void set_try_full_codegen(bool flag);
 
+  // Indicates if this function can be lazy compiled.
+  // This is used to determine if we can safely flush code from a function
+  // when doing GC if we expect that the function will no longer be used.
+  inline bool allows_lazy_compilation();
+  inline void set_allows_lazy_compilation(bool flag);
+
   // Check whether a inlined constructor can be generated with the given
   // prototype.
   bool CanGenerateInlineConstructor(Object* prototype);
@@ -3349,7 +3432,8 @@ class SharedFunctionInfo: public HeapObject {
   // Pointer fields.
   static const int kNameOffset = HeapObject::kHeaderSize;
   static const int kCodeOffset = kNameOffset + kPointerSize;
-  static const int kConstructStubOffset = kCodeOffset + kPointerSize;
+  static const int kScopeInfoOffset = kCodeOffset + kPointerSize;
+  static const int kConstructStubOffset = kScopeInfoOffset + kPointerSize;
   static const int kInstanceClassNameOffset =
       kConstructStubOffset + kPointerSize;
   static const int kFunctionDataOffset =
@@ -3431,6 +3515,7 @@ class SharedFunctionInfo: public HeapObject {
   // Bit positions in compiler_hints.
   static const int kHasOnlySimpleThisPropertyAssignments = 0;
   static const int kTryFullCodegen = 1;
+  static const int kAllowLazyCompilation = 2;
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(SharedFunctionInfo);
 };
@@ -3803,6 +3888,7 @@ class JSRegExp: public JSObject {
   static const int kIgnoreCaseFieldIndex = 2;
   static const int kMultilineFieldIndex = 3;
   static const int kLastIndexFieldIndex = 4;
+  static const int kInObjectFieldCount = 5;
 };
 
 
@@ -4055,12 +4141,14 @@ class String: public HeapObject {
   inline bool IsAsciiRepresentation();
   inline bool IsTwoByteRepresentation();
 
-  // Check whether this string is an external two-byte string that in
-  // fact contains only ascii characters.
+  // Returns whether this string has ascii chars, i.e. all of them can
+  // be ascii encoded.  This might be the case even if the string is
+  // two-byte.  Such strings may appear when the embedder prefers
+  // two-byte external representations even for ascii data.
   //
-  // Such strings may appear when the embedder prefers two-byte
-  // representations even for ascii data.
-  inline bool IsExternalTwoByteStringWithAsciiChars();
+  // NOTE: this should be considered only a hint.  False negatives are
+  // possible.
+  inline bool HasOnlyAsciiChars();
 
   // Get and set individual two byte chars in the string.
   inline void Set(int index, uint16_t value);
@@ -4192,11 +4280,11 @@ class String: public HeapObject {
   // computed the 2nd bit tells whether the string can be used as an
   // array index.
   static const int kHashNotComputedMask = 1;
-  static const int kIsArrayIndexMask = 1 << 1;
-  static const int kNofLengthBitFields = 2;
+  static const int kIsNotArrayIndexMask = 1 << 1;
+  static const int kNofHashBitFields = 2;
 
   // Shift constant retrieving hash code from hash field.
-  static const int kHashShift = kNofLengthBitFields;
+  static const int kHashShift = kNofHashBitFields;
 
   // Array index strings this short can keep their index in the hash
   // field.
@@ -4205,18 +4293,35 @@ class String: public HeapObject {
   // For strings which are array indexes the hash value has the string length
   // mixed into the hash, mainly to avoid a hash value of zero which would be
   // the case for the string '0'. 24 bits are used for the array index value.
-  static const int kArrayIndexHashLengthShift = 24 + kNofLengthBitFields;
+  static const int kArrayIndexValueBits = 24;
+  static const int kArrayIndexLengthBits =
+      kBitsPerInt - kArrayIndexValueBits - kNofHashBitFields;
+
+  STATIC_CHECK((kArrayIndexLengthBits > 0));
+
+  static const int kArrayIndexHashLengthShift =
+      kArrayIndexValueBits + kNofHashBitFields;
+
   static const int kArrayIndexHashMask = (1 << kArrayIndexHashLengthShift) - 1;
-  static const int kArrayIndexValueBits =
-      kArrayIndexHashLengthShift - kHashShift;
+
   static const int kArrayIndexValueMask =
       ((1 << kArrayIndexValueBits) - 1) << kHashShift;
 
+  // Check that kMaxCachedArrayIndexLength + 1 is a power of two so we
+  // could use a mask to test if the length of string is less than or equal to
+  // kMaxCachedArrayIndexLength.
+  STATIC_CHECK(IS_POWER_OF_TWO(kMaxCachedArrayIndexLength + 1));
+
+  static const int kContainsCachedArrayIndexMask =
+      (~kMaxCachedArrayIndexLength << kArrayIndexHashLengthShift) |
+      kIsNotArrayIndexMask;
+
   // Value of empty hash field indicating that the hash is not computed.
-  static const int kEmptyHashField = kHashNotComputedMask;
+  static const int kEmptyHashField =
+      kIsNotArrayIndexMask | kHashNotComputedMask;
 
   // Value of hash field containing computed hash equal to zero.
-  static const int kZeroHash = 0;
+  static const int kZeroHash = kIsNotArrayIndexMask;
 
   // Maximal string length.
   static const int kMaxLength = (1 << (32 - 2)) - 1;
@@ -4316,6 +4421,8 @@ class SeqString: public String {
 // Each character in the AsciiString is an ascii character.
 class SeqAsciiString: public SeqString {
  public:
+  static const bool kHasAsciiEncoding = true;
+
   // Dispatched behavior.
   inline uint16_t SeqAsciiStringGet(int index);
   inline void SeqAsciiStringSet(int index, uint16_t value);
@@ -4365,6 +4472,8 @@ class SeqAsciiString: public SeqString {
 // Each character in the TwoByteString is a two-byte uint16_t.
 class SeqTwoByteString: public SeqString {
  public:
+  static const bool kHasAsciiEncoding = false;
+
   // Dispatched behavior.
   inline uint16_t SeqTwoByteStringGet(int index);
   inline void SeqTwoByteStringSet(int index, uint16_t value);
@@ -4497,6 +4606,8 @@ class ExternalString: public String {
 // ASCII string.
 class ExternalAsciiString: public ExternalString {
  public:
+  static const bool kHasAsciiEncoding = true;
+
   typedef v8::String::ExternalAsciiStringResource Resource;
 
   // The underlying resource.
@@ -4529,6 +4640,8 @@ class ExternalAsciiString: public ExternalString {
 // encoded string.
 class ExternalTwoByteString: public ExternalString {
  public:
+  static const bool kHasAsciiEncoding = false;
+
   typedef v8::String::ExternalStringResource Resource;
 
   // The underlying string resource.

@@ -1,4 +1,5 @@
-require("../common");
+common = require("../common");
+assert = common.assert
 
 var spawn = require('child_process').spawn;
 
@@ -15,7 +16,7 @@ var gotStdoutEOF = false;
 
 cat.stdout.setEncoding('utf8');
 cat.stdout.addListener("data", function (chunk) {
-  puts("stdout: " + chunk);
+  console.log("stdout: " + chunk);
   response += chunk;
 });
 
@@ -37,7 +38,7 @@ cat.stderr.addListener("end", function (chunk) {
 
 
 cat.addListener("exit", function (status) {
-  puts("exit event");
+  console.log("exit event");
   exitStatus = status;
   assert.equal("hello world", response);
 });

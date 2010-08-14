@@ -229,10 +229,18 @@ void ExternalReferenceTable::PopulateTable() {
       DEBUG_ADDRESS,
       Debug::k_after_break_target_address << kDebugIdShift,
       "Debug::after_break_target_address()");
+  Add(Debug_Address(Debug::k_debug_break_slot_address).address(),
+      DEBUG_ADDRESS,
+      Debug::k_debug_break_slot_address << kDebugIdShift,
+      "Debug::debug_break_slot_address()");
   Add(Debug_Address(Debug::k_debug_break_return_address).address(),
       DEBUG_ADDRESS,
       Debug::k_debug_break_return_address << kDebugIdShift,
       "Debug::debug_break_return_address()");
+  Add(Debug_Address(Debug::k_restarter_frame_function_pointer).address(),
+      DEBUG_ADDRESS,
+      Debug::k_restarter_frame_function_pointer << kDebugIdShift,
+      "Debug::restarter_frame_function_pointer_address()");
   const char* debug_register_format = "Debug::register_address(%i)";
   int dr_format_length = StrLength(debug_register_format);
   for (int i = 0; i < kNumJSCallerSaved; ++i) {
@@ -356,94 +364,108 @@ void ExternalReferenceTable::PopulateTable() {
       UNCLASSIFIED,
       5,
       "StackGuard::address_of_real_jslimit()");
+#ifndef V8_INTERPRETED_REGEXP
   Add(ExternalReference::address_of_regexp_stack_limit().address(),
       UNCLASSIFIED,
       6,
       "RegExpStack::limit_address()");
-  Add(ExternalReference::new_space_start().address(),
+  Add(ExternalReference::address_of_regexp_stack_memory_address().address(),
       UNCLASSIFIED,
       7,
+      "RegExpStack::memory_address()");
+  Add(ExternalReference::address_of_regexp_stack_memory_size().address(),
+      UNCLASSIFIED,
+      8,
+      "RegExpStack::memory_size()");
+  Add(ExternalReference::address_of_static_offsets_vector().address(),
+      UNCLASSIFIED,
+      9,
+      "OffsetsVector::static_offsets_vector");
+#endif  // V8_INTERPRETED_REGEXP
+  Add(ExternalReference::new_space_start().address(),
+      UNCLASSIFIED,
+      10,
       "Heap::NewSpaceStart()");
   Add(ExternalReference::new_space_mask().address(),
       UNCLASSIFIED,
-      8,
+      11,
       "Heap::NewSpaceMask()");
   Add(ExternalReference::heap_always_allocate_scope_depth().address(),
       UNCLASSIFIED,
-      9,
+      12,
       "Heap::always_allocate_scope_depth()");
   Add(ExternalReference::new_space_allocation_limit_address().address(),
       UNCLASSIFIED,
-      10,
+      13,
       "Heap::NewSpaceAllocationLimitAddress()");
   Add(ExternalReference::new_space_allocation_top_address().address(),
       UNCLASSIFIED,
-      11,
+      14,
       "Heap::NewSpaceAllocationTopAddress()");
 #ifdef ENABLE_DEBUGGER_SUPPORT
   Add(ExternalReference::debug_break().address(),
       UNCLASSIFIED,
-      12,
+      15,
       "Debug::Break()");
   Add(ExternalReference::debug_step_in_fp_address().address(),
       UNCLASSIFIED,
-      13,
+      16,
       "Debug::step_in_fp_addr()");
 #endif
   Add(ExternalReference::double_fp_operation(Token::ADD).address(),
       UNCLASSIFIED,
-      14,
+      17,
       "add_two_doubles");
   Add(ExternalReference::double_fp_operation(Token::SUB).address(),
       UNCLASSIFIED,
-      15,
+      18,
       "sub_two_doubles");
   Add(ExternalReference::double_fp_operation(Token::MUL).address(),
       UNCLASSIFIED,
-      16,
+      19,
       "mul_two_doubles");
   Add(ExternalReference::double_fp_operation(Token::DIV).address(),
       UNCLASSIFIED,
-      17,
+      20,
       "div_two_doubles");
   Add(ExternalReference::double_fp_operation(Token::MOD).address(),
       UNCLASSIFIED,
-      18,
+      21,
       "mod_two_doubles");
   Add(ExternalReference::compare_doubles().address(),
       UNCLASSIFIED,
-      19,
+      22,
       "compare_doubles");
 #ifndef V8_INTERPRETED_REGEXP
   Add(ExternalReference::re_case_insensitive_compare_uc16().address(),
       UNCLASSIFIED,
-      20,
+      23,
       "NativeRegExpMacroAssembler::CaseInsensitiveCompareUC16()");
   Add(ExternalReference::re_check_stack_guard_state().address(),
       UNCLASSIFIED,
-      21,
+      24,
       "RegExpMacroAssembler*::CheckStackGuardState()");
   Add(ExternalReference::re_grow_stack().address(),
       UNCLASSIFIED,
-      22,
+      25,
       "NativeRegExpMacroAssembler::GrowStack()");
   Add(ExternalReference::re_word_character_map().address(),
       UNCLASSIFIED,
-      23,
+      26,
       "NativeRegExpMacroAssembler::word_character_map");
 #endif  // V8_INTERPRETED_REGEXP
   // Keyed lookup cache.
   Add(ExternalReference::keyed_lookup_cache_keys().address(),
       UNCLASSIFIED,
-      24,
+      27,
       "KeyedLookupCache::keys()");
   Add(ExternalReference::keyed_lookup_cache_field_offsets().address(),
       UNCLASSIFIED,
-      25,
+      28,
       "KeyedLookupCache::field_offsets()");
   Add(ExternalReference::transcendental_cache_array_address().address(),
       UNCLASSIFIED,
-      26,
+      29,
       "TranscendentalCache::caches()");
 }
 
@@ -460,6 +482,7 @@ ExternalReferenceEncoder::ExternalReferenceEncoder()
 
 uint32_t ExternalReferenceEncoder::Encode(Address key) const {
   int index = IndexOf(key);
+  ASSERT(key == NULL || index >= 0);
   return index >=0 ? ExternalReferenceTable::instance()->code(index) : 0;
 }
 
@@ -657,6 +680,14 @@ void Deserializer::ReadObject(int space_number,
     LOG(SnapshotPositionEvent(address, source_->position()));
   }
   ReadChunk(current, limit, space_number, address);
+
+  if (space == Heap::map_space()) {
+    ASSERT(size == Map::kSize);
+    HeapObject* obj = HeapObject::FromAddress(address);
+    Map* map = reinterpret_cast<Map*>(obj);
+    map->set_scavenger(Heap::GetScavenger(map->instance_type(),
+                                          map->instance_size()));
+  }
 }
 
 

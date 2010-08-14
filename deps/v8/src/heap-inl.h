@@ -117,7 +117,12 @@ void Heap::FinalizeExternalString(String* string) {
           reinterpret_cast<byte*>(string) +
           ExternalString::kResourceOffset -
           kHeapObjectTag);
-  delete *resource_addr;
+
+  // Dispose of the C++ object if it has not already been disposed.
+  if (*resource_addr != NULL) {
+    (*resource_addr)->Dispose();
+  }
+
   // Clear the resource pointer in the string.
   *resource_addr = NULL;
 }
@@ -191,12 +196,9 @@ void Heap::RecordWrite(Address address, int offset) {
 void Heap::RecordWrites(Address address, int start, int len) {
   if (new_space_.Contains(address)) return;
   ASSERT(!new_space_.FromSpaceContains(address));
-  for (int offset = start;
-       offset < start + len * kPointerSize;
-       offset += kPointerSize) {
-    SLOW_ASSERT(Contains(address + offset));
-    Page::FromAddress(address)->MarkRegionDirty(address + offset);
-  }
+  Page* page = Page::FromAddress(address);
+  page->SetRegionMarks(page->GetRegionMarks() |
+      page->GetRegionMaskForSpan(address + start, len * kPointerSize));
 }
 
 
@@ -388,7 +390,7 @@ void Heap::SetLastScriptId(Object* last_script_id) {
     Object* __object__ = FUNCTION_CALL;                                   \
     if (!__object__->IsFailure()) RETURN_VALUE;                           \
     if (__object__->IsOutOfMemoryFailure()) {                             \
-      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_0");      \
+      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_0", true);\
     }                                                                     \
     if (!__object__->IsRetryAfterGC()) RETURN_EMPTY;                      \
     Heap::CollectGarbage(Failure::cast(__object__)->requested(),          \
@@ -396,7 +398,7 @@ void Heap::SetLastScriptId(Object* last_script_id) {
     __object__ = FUNCTION_CALL;                                           \
     if (!__object__->IsFailure()) RETURN_VALUE;                           \
     if (__object__->IsOutOfMemoryFailure()) {                             \
-      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_1");      \
+      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_1", true);\
     }                                                                     \
     if (!__object__->IsRetryAfterGC()) RETURN_EMPTY;                      \
     Counters::gc_last_resort_from_handles.Increment();                    \
@@ -409,7 +411,7 @@ void Heap::SetLastScriptId(Object* last_script_id) {
     if (__object__->IsOutOfMemoryFailure() ||                             \
         __object__->IsRetryAfterGC()) {                                   \
       /* TODO(1181417): Fix this. */                                      \
-      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_2");      \
+      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_2", true);\
     }                                                                     \
     RETURN_EMPTY;                                                         \
   } while (false)

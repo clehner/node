@@ -110,10 +110,10 @@ void FullCodeGenerator::Generate(CompilationInfo* info, Mode mode) {
           __ mov(r1, Operand(Context::SlotOffset(slot->index())));
           __ str(r0, MemOperand(cp, r1));
           // Update the write barrier. This clobbers all involved
-          // registers, so we have use a third register to avoid
+          // registers, so we have to use two more registers to avoid
           // clobbering cp.
           __ mov(r2, Operand(cp));
-          __ RecordWrite(r2, r1, r0);
+          __ RecordWrite(r2, Operand(r1), r3, r0);
         }
       }
     }
@@ -196,11 +196,11 @@ void FullCodeGenerator::Generate(CompilationInfo* info, Mode mode) {
     // body.
     __ LoadRoot(r0, Heap::kUndefinedValueRootIndex);
   }
-  EmitReturnSequence(function()->end_position());
+  EmitReturnSequence();
 }
 
 
-void FullCodeGenerator::EmitReturnSequence(int position) {
+void FullCodeGenerator::EmitReturnSequence() {
   Comment cmnt(masm_, "[ Return sequence");
   if (return_label_.is_bound()) {
     __ b(&return_label_);
@@ -224,7 +224,7 @@ void FullCodeGenerator::EmitReturnSequence(int position) {
       // Here we use masm_-> instead of the __ macro to avoid the code coverage
       // tool from instrumenting as we rely on the code size here.
       int32_t sp_delta = (scope()->num_parameters() + 1) * kPointerSize;
-      CodeGenerator::RecordPositions(masm_, position);
+      CodeGenerator::RecordPositions(masm_, function()->end_position() - 1);
       __ RecordJSReturn();
       masm_->mov(sp, fp);
       masm_->ldm(ia_w, sp, fp.bit() | lr.bit());
@@ -238,8 +238,10 @@ void FullCodeGenerator::EmitReturnSequence(int position) {
     // add instruction the add will generate two instructions.
     int return_sequence_length =
         masm_->InstructionsGeneratedSince(&check_exit_codesize);
-    CHECK(return_sequence_length == Assembler::kJSReturnSequenceLength ||
-          return_sequence_length == Assembler::kJSReturnSequenceLength + 1);
+    CHECK(return_sequence_length ==
+          Assembler::kJSReturnSequenceInstructions ||
+          return_sequence_length ==
+          Assembler::kJSReturnSequenceInstructions + 1);
 #endif
   }
 }
@@ -664,8 +666,10 @@ void FullCodeGenerator::Move(Slot* dst,
   __ str(src, location);
   // Emit the write barrier code if the location is in the heap.
   if (dst->type() == Slot::CONTEXT) {
-    __ mov(scratch2, Operand(Context::SlotOffset(dst->index())));
-    __ RecordWrite(scratch1, scratch2, src);
+    __ RecordWrite(scratch1,
+                   Operand(Context::SlotOffset(dst->index())),
+                   scratch2,
+                   src);
   }
 }
 
@@ -713,10 +717,9 @@ void FullCodeGenerator::EmitDeclaration(Variable* variable,
           __ str(result_register(),
                  CodeGenerator::ContextOperand(cp, slot->index()));
           int offset = Context::SlotOffset(slot->index());
-          __ mov(r2, Operand(offset));
           // We know that we have written a function, which is not a smi.
           __ mov(r1, Operand(cp));
-          __ RecordWrite(r1, r2, result_register());
+          __ RecordWrite(r1, Operand(offset), r2, result_register());
         }
         break;
 
@@ -819,8 +822,7 @@ void FullCodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
     // the smi vs. smi case to be handled before it is called.
     Label slow_case;
     __ ldr(r1, MemOperand(sp, 0));  // Switch value.
-    __ mov(r2, r1);
-    __ orr(r2, r2, r0);
+    __ orr(r2, r1, r0);
     __ tst(r2, Operand(kSmiTagMask));
     __ b(ne, &slow_case);
     __ cmp(r1, r0);
@@ -829,9 +831,9 @@ void FullCodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
     __ b(clause->body_target()->entry_label());
 
     __ bind(&slow_case);
-    CompareStub stub(eq, true);
+    CompareStub stub(eq, true, kBothCouldBeNaN, true, r1, r0);
     __ CallStub(&stub);
-    __ tst(r0, r0);
+    __ cmp(r0, Operand(0));
     __ b(ne, &next_test);
     __ Drop(1);  // Switch value is no longer needed.
     __ b(clause->body_target()->entry_label());
@@ -1102,13 +1104,13 @@ void FullCodeGenerator::EmitVariableLoad(Variable* var,
 
 void FullCodeGenerator::VisitRegExpLiteral(RegExpLiteral* expr) {
   Comment cmnt(masm_, "[ RegExpLiteral");
-  Label done;
+  Label materialized;
   // Registers will be used as follows:
   // r4 = JS function, literals array
   // r3 = literal index
   // r2 = RegExp pattern
   // r1 = RegExp flags
-  // r0 = temp + return value (RegExp literal)
+  // r0 = temp + materialized value (RegExp literal)
   __ ldr(r0, MemOperand(fp,  JavaScriptFrameConstants::kFunctionOffset));
   __ ldr(r4,  FieldMemOperand(r0, JSFunction::kLiteralsOffset));
   int literal_offset =
@@ -1116,13 +1118,24 @@ void FullCodeGenerator::VisitRegExpLiteral(RegExpLiteral* expr) {
   __ ldr(r0, FieldMemOperand(r4, literal_offset));
   __ LoadRoot(ip, Heap::kUndefinedValueRootIndex);
   __ cmp(r0, ip);
-  __ b(ne, &done);
+  __ b(ne, &materialized);
   __ mov(r3, Operand(Smi::FromInt(expr->literal_index())));
   __ mov(r2, Operand(expr->pattern()));
   __ mov(r1, Operand(expr->flags()));
   __ Push(r4, r3, r2, r1);
   __ CallRuntime(Runtime::kMaterializeRegExpLiteral, 4);
-  __ bind(&done);
+  __ bind(&materialized);
+  int size = JSRegExp::kSize + JSRegExp::kInObjectFieldCount * kPointerSize;
+  __ push(r0);
+  __ mov(r0, Operand(Smi::FromInt(size)));
+  __ push(r0);
+  __ CallRuntime(Runtime::kAllocateInNewSpace, 1);
+  // After this, registers are used as follows:
+  // r0: Newly allocated regexp.
+  // r1: Materialized regexp
+  // r2: temp.
+  __ pop(r1);
+  __ CopyFields(r0, r1, r2.bit(), size / kPointerSize);
   Apply(context_, r0);
 }
 
@@ -1250,8 +1263,7 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
 
     // Update the write barrier for the array store with r0 as the scratch
     // register.
-    __ mov(r2, Operand(offset));
-    __ RecordWrite(r1, r2, result_register());
+    __ RecordWrite(r1, Operand(offset), r2, result_register());
   }
 
   if (result_saved) {
@@ -1491,8 +1503,7 @@ void FullCodeGenerator::EmitVariableAssignment(Variable* var,
         // RecordWrite may destroy all its register arguments.
         __ mov(r3, result_register());
         int offset = FixedArray::kHeaderSize + slot->index() * kPointerSize;
-        __ mov(r2, Operand(offset));
-        __ RecordWrite(r1, r2, r3);
+        __ RecordWrite(r1, Operand(offset), r2, r3);
         break;
       }
 
@@ -1646,6 +1657,30 @@ void FullCodeGenerator::EmitCallWithIC(Call* expr,
 }
 
 
+void FullCodeGenerator::EmitKeyedCallWithIC(Call* expr,
+                                            Expression* key,
+                                            RelocInfo::Mode mode) {
+  // Code common for calls using the IC.
+  ZoneList<Expression*>* args = expr->arguments();
+  int arg_count = args->length();
+  for (int i = 0; i < arg_count; i++) {
+    VisitForValue(args->at(i), kStack);
+  }
+  VisitForValue(key, kAccumulator);
+  __ mov(r2, r0);
+  // Record source position for debugger.
+  SetSourcePosition(expr->position());
+  // Call the IC initialization code.
+  InLoopFlag in_loop = (loop_depth() > 0) ? IN_LOOP : NOT_IN_LOOP;
+  Handle<Code> ic = CodeGenerator::ComputeKeyedCallInitialize(arg_count,
+                                                              in_loop);
+  __ Call(ic, mode);
+  // Restore context register.
+  __ ldr(cp, MemOperand(fp, StandardFrameConstants::kContextOffset));
+  Apply(context_, r0);
+}
+
+
 void FullCodeGenerator::EmitCallWithStub(Call* expr) {
   // Code common for calls using the call stub.
   ZoneList<Expression*>* args = expr->arguments();
@@ -1741,35 +1776,28 @@ void FullCodeGenerator::VisitCall(Call* expr) {
       VisitForValue(prop->obj(), kStack);
       EmitCallWithIC(expr, key->handle(), RelocInfo::CODE_TARGET);
     } else {
-      // Call to a keyed property, use keyed load IC followed by function
-      // call.
+      // Call to a keyed property.
+      // For a synthetic property use keyed load IC followed by function call,
+      // for a regular property use keyed CallIC.
       VisitForValue(prop->obj(), kStack);
-      VisitForValue(prop->key(), kAccumulator);
-      // Record source code position for IC call.
-      SetSourcePosition(prop->position());
       if (prop->is_synthetic()) {
+        VisitForValue(prop->key(), kAccumulator);
+        // Record source code position for IC call.
+        SetSourcePosition(prop->position());
         __ pop(r1);  // We do not need to keep the receiver.
-      } else {
-        __ ldr(r1, MemOperand(sp, 0));  // Keep receiver, to call function on.
-      }
 
-      Handle<Code> ic(Builtins::builtin(Builtins::KeyedLoadIC_Initialize));
-      __ Call(ic, RelocInfo::CODE_TARGET);
-      if (prop->is_synthetic()) {
+        Handle<Code> ic(Builtins::builtin(Builtins::KeyedLoadIC_Initialize));
+        __ Call(ic, RelocInfo::CODE_TARGET);
         // Push result (function).
         __ push(r0);
         // Push Global receiver.
         __ ldr(r1, CodeGenerator::GlobalObject());
         __ ldr(r1, FieldMemOperand(r1, GlobalObject::kGlobalReceiverOffset));
         __ push(r1);
+        EmitCallWithStub(expr);
       } else {
-        // Pop receiver.
-        __ pop(r1);
-        // Push result (function).
-        __ push(r0);
-        __ push(r1);
+        EmitKeyedCallWithIC(expr, prop->key(), RelocInfo::CODE_TARGET);
       }
-      EmitCallWithStub(expr);
     }
   } else {
     // Call to some other expression.  If the expression is an anonymous
@@ -1885,6 +1913,25 @@ void FullCodeGenerator::EmitIsObject(ZoneList<Expression*>* args) {
   __ b(lt, if_false);
   __ cmp(r1, Operand(LAST_JS_OBJECT_TYPE));
   __ b(le, if_true);
+  __ b(if_false);
+
+  Apply(context_, if_true, if_false);
+}
+
+
+void FullCodeGenerator::EmitIsSpecObject(ZoneList<Expression*>* args) {
+  ASSERT(args->length() == 1);
+
+  VisitForValue(args->at(0), kAccumulator);
+
+  Label materialize_true, materialize_false;
+  Label* if_true = NULL;
+  Label* if_false = NULL;
+  PrepareTest(&materialize_true, &materialize_false, &if_true, &if_false);
+
+  __ BranchOnSmi(r0, if_false);
+  __ CompareObjectType(r0, r1, r1, FIRST_JS_OBJECT_TYPE);
+  __ b(ge, if_true);
   __ b(if_false);
 
   Apply(context_, if_true, if_false);
@@ -2138,16 +2185,13 @@ void FullCodeGenerator::EmitRandomHeapNumber(ZoneList<Expression*>* args) {
   Label slow_allocate_heapnumber;
   Label heapnumber_allocated;
 
-  __ AllocateHeapNumber(r4, r1, r2, &slow_allocate_heapnumber);
+  __ LoadRoot(r6, Heap::kHeapNumberMapRootIndex);
+  __ AllocateHeapNumber(r4, r1, r2, r6, &slow_allocate_heapnumber);
   __ jmp(&heapnumber_allocated);
 
   __ bind(&slow_allocate_heapnumber);
-  // To allocate a heap number, and ensure that it is not a smi, we
-  // call the runtime function FUnaryMinus on 0, returning the double
-  // -0.0. A new, distinct heap number is returned each time.
-  __ mov(r0, Operand(Smi::FromInt(0)));
-  __ push(r0);
-  __ CallRuntime(Runtime::kNumberUnaryMinus, 1);
+  // Allocate a heap number.
+  __ CallRuntime(Runtime::kNumberAlloc, 0);
   __ mov(r4, Operand(r0));
 
   __ bind(&heapnumber_allocated);
@@ -2257,8 +2301,7 @@ void FullCodeGenerator::EmitSetValueOf(ZoneList<Expression*>* args) {
   __ str(r0, FieldMemOperand(r1, JSValue::kValueOffset));
   // Update the write barrier.  Save the value as it will be
   // overwritten by the write barrier code and is needed afterward.
-  __ mov(r2, Operand(JSValue::kValueOffset - kHeapObjectTag));
-  __ RecordWrite(r1, r2, r3);
+  __ RecordWrite(r1, Operand(JSValue::kValueOffset - kHeapObjectTag), r2, r3);
 
   __ bind(&done);
   Apply(context_, r0);
@@ -2534,6 +2577,47 @@ void FullCodeGenerator::EmitGetFromCache(ZoneList<Expression*>* args) {
 }
 
 
+void FullCodeGenerator::EmitIsRegExpEquivalent(ZoneList<Expression*>* args) {
+  ASSERT_EQ(2, args->length());
+
+  Register right = r0;
+  Register left = r1;
+  Register tmp = r2;
+  Register tmp2 = r3;
+
+  VisitForValue(args->at(0), kStack);
+  VisitForValue(args->at(1), kAccumulator);
+  __ pop(left);
+
+  Label done, fail, ok;
+  __ cmp(left, Operand(right));
+  __ b(eq, &ok);
+  // Fail if either is a non-HeapObject.
+  __ and_(tmp, left, Operand(right));
+  __ tst(tmp, Operand(kSmiTagMask));
+  __ b(eq, &fail);
+  __ ldr(tmp, FieldMemOperand(left, HeapObject::kMapOffset));
+  __ ldrb(tmp2, FieldMemOperand(tmp, Map::kInstanceTypeOffset));
+  __ cmp(tmp2, Operand(JS_REGEXP_TYPE));
+  __ b(ne, &fail);
+  __ ldr(tmp2, FieldMemOperand(right, HeapObject::kMapOffset));
+  __ cmp(tmp, Operand(tmp2));
+  __ b(ne, &fail);
+  __ ldr(tmp, FieldMemOperand(left, JSRegExp::kDataOffset));
+  __ ldr(tmp2, FieldMemOperand(right, JSRegExp::kDataOffset));
+  __ cmp(tmp, tmp2);
+  __ b(eq, &ok);
+  __ bind(&fail);
+  __ LoadRoot(r0, Heap::kFalseValueRootIndex);
+  __ jmp(&done);
+  __ bind(&ok);
+  __ LoadRoot(r0, Heap::kTrueValueRootIndex);
+  __ bind(&done);
+
+  Apply(context_, r0);
+}
+
+
 void FullCodeGenerator::VisitCallRuntime(CallRuntime* expr) {
   Handle<String> name = expr->name();
   if (name->length() > 0 && name->Get(0) == '_') {
@@ -2718,9 +2802,11 @@ void FullCodeGenerator::VisitUnaryOperation(UnaryOperation* expr) {
 
     case Token::SUB: {
       Comment cmt(masm_, "[ UnaryOperation (SUB)");
-      bool overwrite =
+      bool can_overwrite =
           (expr->expression()->AsBinaryOperation() != NULL &&
            expr->expression()->AsBinaryOperation()->ResultOverwriteAllowed());
+      UnaryOverwriteMode overwrite =
+          can_overwrite ? UNARY_OVERWRITE : UNARY_NO_OVERWRITE;
       GenericUnaryOpStub stub(Token::SUB, overwrite);
       // GenericUnaryOpStub expects the argument to be in the
       // accumulator register r0.
@@ -2732,9 +2818,11 @@ void FullCodeGenerator::VisitUnaryOperation(UnaryOperation* expr) {
 
     case Token::BIT_NOT: {
       Comment cmt(masm_, "[ UnaryOperation (BIT_NOT)");
-      bool overwrite =
+      bool can_overwrite =
           (expr->expression()->AsBinaryOperation() != NULL &&
            expr->expression()->AsBinaryOperation()->ResultOverwriteAllowed());
+      UnaryOverwriteMode overwrite =
+          can_overwrite ? UNARY_OVERWRITE : UNARY_NO_OVERWRITE;
       GenericUnaryOpStub stub(Token::BIT_NOT, overwrite);
       // GenericUnaryOpStub expects the argument to be in the
       // accumulator register r0.
@@ -3070,7 +3158,7 @@ void FullCodeGenerator::VisitCompareOperation(CompareOperation* expr) {
       __ jmp(if_false);
 
       __ bind(&slow_case);
-      CompareStub stub(cc, strict);
+      CompareStub stub(cc, strict, kBothCouldBeNaN, true, r1, r0);
       __ CallStub(&stub);
       __ cmp(r0, Operand(0));
       __ b(cc, if_true);

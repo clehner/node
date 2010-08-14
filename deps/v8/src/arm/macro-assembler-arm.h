@@ -67,6 +67,17 @@ enum AllocationFlags {
 };
 
 
+// Flags used for the ObjectToDoubleVFPRegister function.
+enum ObjectToDoubleFlags {
+  // No special flags.
+  NO_OBJECT_TO_DOUBLE_FLAGS = 0,
+  // Object is known to be a non smi.
+  OBJECT_NOT_SMI = 1 << 0,
+  // Don't load NaNs or infinities, branch to the non number case instead.
+  AVOID_NANS_AND_INFINITIES = 1 << 1
+};
+
+
 // MacroAssembler implements a collection of frequently used macros.
 class MacroAssembler: public Assembler {
  public:
@@ -93,6 +104,17 @@ class MacroAssembler: public Assembler {
             Register scratch = no_reg,
             Condition cond = al);
 
+
+  void And(Register dst, Register src1, const Operand& src2,
+           Condition cond = al);
+  void Ubfx(Register dst, Register src, int lsb, int width,
+            Condition cond = al);
+  void Sbfx(Register dst, Register src, int lsb, int width,
+            Condition cond = al);
+  void Bfc(Register dst, int lsb, int width, Condition cond = al);
+  void Usat(Register dst, int satpos, const Operand& src,
+            Condition cond = al);
+
   void Call(Label* target);
   void Move(Register dst, Handle<Object> value);
   // May do nothing if the registers are identical.
@@ -117,15 +139,31 @@ class MacroAssembler: public Assembler {
                   Label* branch);
 
 
-  // For the page containing |object| mark the region covering [object+offset]
+  // For the page containing |object| mark the region covering [address]
   // dirty. The object address must be in the first 8K of an allocated page.
-  void RecordWriteHelper(Register object, Register offset, Register scratch);
+  void RecordWriteHelper(Register object,
+                         Register address,
+                         Register scratch);
 
-  // For the page containing |object| mark the region covering [object+offset]
-  // dirty. The object address must be in the first 8K of an allocated page.
-  // The 'scratch' register is used in the implementation and all 3 registers
-  // are clobbered by the operation, as well as the ip register.
-  void RecordWrite(Register object, Register offset, Register scratch);
+  // For the page containing |object| mark the region covering
+  // [object+offset] dirty. The object address must be in the first 8K
+  // of an allocated page.  The 'scratch' registers are used in the
+  // implementation and all 3 registers are clobbered by the
+  // operation, as well as the ip register. RecordWrite updates the
+  // write barrier even when storing smis.
+  void RecordWrite(Register object,
+                   Operand offset,
+                   Register scratch0,
+                   Register scratch1);
+
+  // For the page containing |object| mark the region covering
+  // [address] dirty. The object address must be in the first 8K of an
+  // allocated page.  All 3 registers are clobbered by the operation,
+  // as well as the ip register. RecordWrite updates the write barrier
+  // even when storing smis.
+  void RecordWrite(Register object,
+                   Register address,
+                   Register scratch);
 
   // Push two registers.  Pushes leftmost register first (to highest address).
   void Push(Register src1, Register src2, Condition cond = al) {
@@ -280,24 +318,6 @@ class MacroAssembler: public Assembler {
   // ---------------------------------------------------------------------------
   // Inline caching support
 
-  // Generates code that verifies that the maps of objects in the
-  // prototype chain of object hasn't changed since the code was
-  // generated and branches to the miss label if any map has. If
-  // necessary the function also generates code for security check
-  // in case of global object holders. The scratch and holder
-  // registers are always clobbered, but the object register is only
-  // clobbered if it the same as the holder register. The function
-  // returns a register containing the holder - either object_reg or
-  // holder_reg.
-  // The function can optionally (when save_at_depth !=
-  // kInvalidProtoDepth) save the object at the given depth by moving
-  // it to [sp].
-  Register CheckMaps(JSObject* object, Register object_reg,
-                     JSObject* holder, Register holder_reg,
-                     Register scratch,
-                     int save_at_depth,
-                     Label* miss);
-
   // Generate code for checking access rights - used for security checks
   // on access to global objects across environments. The holder register
   // is left untouched, whereas both scratch registers are clobbered.
@@ -364,7 +384,17 @@ class MacroAssembler: public Assembler {
   void AllocateHeapNumber(Register result,
                           Register scratch1,
                           Register scratch2,
+                          Register heap_number_map,
                           Label* gc_required);
+  void AllocateHeapNumberWithValue(Register result,
+                                   DwVfpRegister value,
+                                   Register scratch1,
+                                   Register scratch2,
+                                   Register heap_number_map,
+                                   Label* gc_required);
+
+  // Copies a fixed number of fields of heap objects from src to dst.
+  void CopyFields(Register dst, Register src, RegList temps, int field_count);
 
   // ---------------------------------------------------------------------------
   // Support functions.
@@ -401,14 +431,22 @@ class MacroAssembler: public Assembler {
                            InstanceType type);
 
 
-  // Check if the map of an object is equal to a specified map and
-  // branch to label if not. Skip the smi check if not required
-  // (object is known to be a heap object)
+  // Check if the map of an object is equal to a specified map (either
+  // given directly or as an index into the root list) and branch to
+  // label if not. Skip the smi check if not required (object is known
+  // to be a heap object)
   void CheckMap(Register obj,
                 Register scratch,
                 Handle<Map> map,
                 Label* fail,
                 bool is_heap_object);
+
+  void CheckMap(Register obj,
+                Register scratch,
+                Heap::RootListIndex index,
+                Label* fail,
+                bool is_heap_object);
+
 
   // Load and check the instance type of an object for being a string.
   // Loads the type into the second argument register.
@@ -445,12 +483,35 @@ class MacroAssembler: public Assembler {
                                          Register outHighReg,
                                          Register outLowReg);
 
+  // Load the value of a number object into a VFP double register. If the object
+  // is not a number a jump to the label not_number is performed and the VFP
+  // double register is unchanged.
+  void ObjectToDoubleVFPRegister(
+      Register object,
+      DwVfpRegister value,
+      Register scratch1,
+      Register scratch2,
+      Register heap_number_map,
+      SwVfpRegister scratch3,
+      Label* not_number,
+      ObjectToDoubleFlags flags = NO_OBJECT_TO_DOUBLE_FLAGS);
+
+  // Load the value of a smi object into a VFP double register. The register
+  // scratch1 can be the same register as smi in which case smi will hold the
+  // untagged value afterwards.
+  void SmiToDoubleVFPRegister(Register smi,
+                              DwVfpRegister value,
+                              Register scratch1,
+                              SwVfpRegister scratch2);
+
   // Count leading zeros in a 32 bit word.  On ARM5 and later it uses the clz
   // instruction.  On pre-ARM5 hardware this routine gives the wrong answer
-  // for 0 (31 instead of 32).
-  void CountLeadingZeros(Register source,
-                         Register scratch,
-                         Register zeros);
+  // for 0 (31 instead of 32).  Source and scratch can be the same in which case
+  // the source is clobbered.  Source and zeros can also be the same in which
+  // case scratch should be a different register.
+  void CountLeadingZeros(Register zeros,
+                         Register source,
+                         Register scratch);
 
   // ---------------------------------------------------------------------------
   // Runtime calls
@@ -462,7 +523,7 @@ class MacroAssembler: public Assembler {
   void TailCallStub(CodeStub* stub, Condition cond = al);
 
   // Return from a code stub after popping its arguments.
-  void StubReturn(int argc);
+  void StubReturn(int argc, Condition cond = al);
 
   // Call a runtime routine.
   void CallRuntime(Runtime::Function* f, int num_arguments);
@@ -535,6 +596,7 @@ class MacroAssembler: public Assembler {
   // Calls Abort(msg) if the condition cc is not satisfied.
   // Use --debug_code to enable.
   void Assert(Condition cc, const char* msg);
+  void AssertRegisterIsRoot(Register reg, Heap::RootListIndex index);
 
   // Like Assert(), but always enabled.
   void Check(Condition cc, const char* msg);

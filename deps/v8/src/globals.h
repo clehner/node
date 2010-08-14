@@ -326,6 +326,7 @@ class RegExpCompiler;
 class RegExpVisitor;
 class Scope;
 template<class Allocator = FreeStoreAllocationPolicy> class ScopeInfo;
+class SerializedScopeInfo;
 class Script;
 class Slot;
 class Smi;
@@ -345,7 +346,6 @@ class ObjectGroup;
 class TickSample;
 class VirtualMemory;
 class Mutex;
-class ZoneScopeInfo;
 
 typedef bool (*WeakSlotCallback)(Object** pointer);
 
@@ -460,6 +460,12 @@ enum InLoopFlag {
 enum CallFunctionFlags {
   NO_CALL_FUNCTION_FLAGS = 0,
   RECEIVER_MIGHT_BE_VALUE = 1 << 0  // Receiver might not be a JSObject.
+};
+
+
+enum InlineCacheHolderFlag {
+  OWN_MAP,  // For fast properties objects.
+  PROTOTYPE_MAP  // For slow properties objects (except GlobalObjects).
 };
 
 
@@ -637,17 +643,22 @@ F FUNCTION_CAST(Address addr) {
 #if defined(__GNUC__) && !defined(DEBUG)
 #if (__GNUC__ >= 4)
 #define INLINE(header) inline header  __attribute__((always_inline))
+#define NO_INLINE(header) header __attribute__((noinline))
 #else
 #define INLINE(header) inline __attribute__((always_inline)) header
+#define NO_INLINE(header) __attribute__((noinline)) header
 #endif
 #else
 #define INLINE(header) inline header
+#define NO_INLINE(header) header
 #endif
 
 // Feature flags bit positions. They are mostly based on the CPUID spec.
 // (We assign CPUID itself to one of the currently reserved bits --
 // feel free to change this if needed.)
-enum CpuFeature { SSE3 = 32,   // x86
+// On X86/X64, values below 32 are bits in EDX, values above 32 are bits in ECX.
+enum CpuFeature { SSE4_1 = 32 + 19,  // x86
+                  SSE3 = 32 + 0,     // x86
                   SSE2 = 26,   // x86
                   CMOV = 15,   // x86
                   RDTSC = 4,   // x86

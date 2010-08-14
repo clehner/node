@@ -1,4 +1,5 @@
-require("../common");
+common = require("../common");
+assert = common.assert
 net = require("net");
 http = require("http");
 
@@ -13,25 +14,27 @@ var server = http.createServer(function (req, res) {
   res.writeHead(200, {"Content-Type": "text/plain"});
   res.end(body);
 })
-server.listen(PORT);
+server.listen(common.PORT);
 
-var c = net.createConnection(PORT);
+server.addListener("listening", function() {
+  var c = net.createConnection(common.PORT);
 
-c.setEncoding("utf8");
+  c.setEncoding("utf8");
 
-c.addListener("connect", function () {
-  c.write( "GET / HTTP/1.0\r\n\r\n" );
-});
+  c.addListener("connect", function () {
+    c.write( "GET / HTTP/1.0\r\n\r\n" );
+  });
 
-c.addListener("data", function (chunk) {
-  puts(chunk);
-  server_response += chunk;
-});
+  c.addListener("data", function (chunk) {
+    console.log(chunk);
+    server_response += chunk;
+  });
 
-c.addListener("end", function () {
-  client_got_eof = true;
-  c.end();
-  server.close();
+  c.addListener("end", function () {
+    client_got_eof = true;
+    c.end();
+    server.close();
+  });
 });
 
 process.addListener("exit", function () {

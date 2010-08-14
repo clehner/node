@@ -1,6 +1,7 @@
-require("../common");
+common = require("../common");
+assert = common.assert
 var path = require('path');
-var testTxt = path.join(fixturesDir, "x.txt");
+var testTxt = path.join(common.fixturesDir, "x.txt");
 var fs = require('fs');
 
 setTimeout(function () {
@@ -8,13 +9,13 @@ setTimeout(function () {
   // require() calls..
   N = 30;
   for (var i=0; i < N; i++) {
-    puts("start " + i);
+    console.log("start " + i);
     fs.readFile(testTxt, function(err, data) {
       if (err) {
-        puts("error! " + e);
+        console.log("error! " + e);
         process.exit(1);
       } else {
-        puts("finish");
+        console.log("finish");
       }
     });
   }

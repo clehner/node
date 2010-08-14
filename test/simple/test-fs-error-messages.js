@@ -1,9 +1,10 @@
-require('../common');
+common = require("../common");
+assert = common.assert
 
 var path = require('path'),
     fs = require('fs'),
-    fn = path.join(fixturesDir, 'non-existent'),
-    existingFile = path.join(fixturesDir, 'exit.js');
+    fn = path.join(common.fixturesDir, 'non-existent'),
+    existingFile = path.join(common.fixturesDir, 'exit.js');
 
 // ASYNC_CALL
 
@@ -158,6 +159,6 @@ try {
 }
 
 process.addListener('exit', function () {
-  assert.equal(expected, errors.length, 
+  assert.equal(expected, errors.length,
     'Test fs sync exceptions raised, got ' + errors.length + ' expected ' + expected);
 });

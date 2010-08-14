@@ -1,4 +1,5 @@
-require("../common");
+common = require("../common");
+assert = common.assert
 
 var spawn = require('child_process').spawn;
 
@@ -16,7 +17,7 @@ function doSpawn (i) {
   });
 
   child.stderr.addListener("data", function (chunk) {
-    puts('stderr: ' + chunk);
+    console.log('stderr: ' + chunk);
   });
 
   child.addListener("exit", function () {

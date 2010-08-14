@@ -7,6 +7,8 @@
 #include <http_parser.h>
 
 #include <strings.h>  /* strcasecmp() */
+#include <string.h>  /* strdup() */
+#include <stdlib.h>  /* free() */
 
 // This is a binding to http_parser (http://github.com/ry/http-parser)
 // The goal is to decouple sockets from parsing for more javascript-level
@@ -19,7 +21,7 @@
 // No copying is performed when slicing the buffer, only small reference
 // allocations.
 
- 
+
 namespace node {
 
 using namespace v8;
@@ -50,6 +52,10 @@ static Persistent<String> move_sym;
 static Persistent<String> propfind_sym;
 static Persistent<String> proppatch_sym;
 static Persistent<String> unlock_sym;
+static Persistent<String> report_sym;
+static Persistent<String> mkactivity_sym;
+static Persistent<String> checkout_sym;
+static Persistent<String> merge_sym;
 static Persistent<String> unknown_method_sym;
 
 static Persistent<String> method_sym;
@@ -102,7 +108,7 @@ static struct http_parser_settings settings;
 
 
 static inline Persistent<String>
-method_to_str(enum http_method m) {
+method_to_str(unsigned short m) {
   switch (m) {
     case HTTP_DELETE:     return delete_sym;
     case HTTP_GET:        return get_sym;
@@ -119,6 +125,10 @@ method_to_str(enum http_method m) {
     case HTTP_PROPFIND:   return propfind_sym;
     case HTTP_PROPPATCH:  return proppatch_sym;
     case HTTP_UNLOCK:     return unlock_sym;
+    case HTTP_REPORT:     return report_sym;
+    case HTTP_MKACTIVITY: return mkactivity_sym;
+    case HTTP_CHECKOUT:   return checkout_sym;
+    case HTTP_MERGE:      return merge_sym;
     default:              return unknown_method_sym;
   }
 }
@@ -192,7 +202,7 @@ class Parser : public ObjectWrap {
 
     String::Utf8Value type(args[0]->ToString());
 
-    Parser *parser; 
+    Parser *parser;
 
     if (0 == strcasecmp(*type, "request")) {
       parser = new Parser(HTTP_REQUEST);
@@ -255,7 +265,7 @@ class Parser : public ObjectWrap {
     if (parser->got_exception_) return Local<Value>();
 
     Local<Integer> nparsed_obj = Integer::New(nparsed);
-    // If there was a parse error in one of the callbacks 
+    // If there was a parse error in one of the callbacks
     // TODO What if there is an error on EOF?
     if (!parser->parser_.upgrade && nparsed != len) {
       Local<Value> e = Exception::Error(String::NewSymbol("Parse Error"));
@@ -315,6 +325,86 @@ class Parser : public ObjectWrap {
 };
 
 
+static Handle<Value> UrlDecode (const Arguments& args) {
+  HandleScope scope;
+
+  if (!args[0]->IsString()) {
+    return ThrowException(Exception::TypeError(
+          String::New("First arg must be a string")));
+  }
+
+  bool decode_spaces = args[1]->IsTrue();
+
+  String::Utf8Value in_v(args[0]->ToString());
+  size_t l = in_v.length();
+  char* out = strdup(*in_v);
+
+  enum { CHAR, HEX0, HEX1 } state = CHAR;
+
+  int n, m, hexchar;
+  size_t in_index = 0, out_index = 0;
+  char c;
+  for (; in_index <= l; in_index++) {
+    c = out[in_index];
+    switch (state) {
+      case CHAR:
+        switch (c) {
+          case '%':
+            n = 0;
+            m = 0;
+            state = HEX0;
+            break;
+          case '+':
+            if (decode_spaces) c = ' ';
+            // pass thru
+          default:
+            out[out_index++] = c;
+            break;
+        }
+        break;
+
+      case HEX0:
+        state = HEX1;
+        hexchar = c;
+        if ('0' <= c && c <= '9') {
+          n = c - '0';
+        } else if ('a' <= c && c <= 'f') {
+          n = c - 'a' + 10;
+        } else if ('A' <= c && c <= 'F') {
+          n = c - 'A' + 10;
+        } else {
+          out[out_index++] = '%';
+          out[out_index++] = c;
+          state = CHAR;
+          break;
+        }
+        break;
+
+      case HEX1:
+        state = CHAR;
+        if ('0' <= c && c <= '9') {
+          m = c - '0';
+        } else if ('a' <= c && c <= 'f') {
+          m = c - 'a' + 10;
+        } else if ('A' <= c && c <= 'F') {
+          m = c - 'A' + 10;
+        } else {
+          out[out_index++] = '%';
+          out[out_index++] = hexchar;
+          out[out_index++] = c;
+          break;
+        }
+        out[out_index++] = 16*n + m;
+        break;
+    }
+  }
+
+  Local<String> out_v = String::New(out, out_index-1);
+  free(out);
+  return scope.Close(out_v);
+}
+
+
 void InitHttpParser(Handle<Object> target) {
   HandleScope scope;
 
@@ -327,6 +417,7 @@ void InitHttpParser(Handle<Object> target) {
   NODE_SET_PROTOTYPE_METHOD(t, "reinitialize", Parser::Reinitialize);
 
   target->Set(String::NewSymbol("HTTPParser"), t->GetFunction());
+  NODE_SET_METHOD(target, "urlDecode", UrlDecode);
 
   on_message_begin_sym    = NODE_PSYMBOL("onMessageBegin");
   on_path_sym             = NODE_PSYMBOL("onPath");
@@ -354,6 +445,10 @@ void InitHttpParser(Handle<Object> target) {
   propfind_sym = NODE_PSYMBOL("PROPFIND");
   proppatch_sym = NODE_PSYMBOL("PROPPATCH");
   unlock_sym = NODE_PSYMBOL("UNLOCK");
+  report_sym = NODE_PSYMBOL("REPORT");
+  mkactivity_sym = NODE_PSYMBOL("MKACTIVITY");
+  checkout_sym = NODE_PSYMBOL("CHECKOUT");
+  merge_sym = NODE_PSYMBOL("MERGE");
   unknown_method_sym = NODE_PSYMBOL("UNKNOWN_METHOD");
 
   method_sym = NODE_PSYMBOL("method");
@@ -378,3 +473,4 @@ void InitHttpParser(Handle<Object> target) {
 
 }  // namespace node
 
+NODE_MODULE(node_http_parser, node::InitHttpParser);

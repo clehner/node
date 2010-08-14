@@ -130,6 +130,20 @@ struct DwVfpRegister {
   // Supporting d0 to d15, can be later extended to d31.
   bool is_valid() const  { return 0 <= code_ && code_ < 16; }
   bool is(DwVfpRegister reg) const  { return code_ == reg.code_; }
+  SwVfpRegister low() const  {
+    SwVfpRegister reg;
+    reg.code_ = code_ * 2;
+
+    ASSERT(reg.is_valid());
+    return reg;
+  }
+  SwVfpRegister high() const  {
+    SwVfpRegister reg;
+    reg.code_ = (code_ * 2) + 1;
+
+    ASSERT(reg.is_valid());
+    return reg;
+  }
   int code() const  {
     ASSERT(is_valid());
     return code_;
@@ -279,7 +293,10 @@ enum Condition {
 
 
 // Returns the equivalent of !cc.
-INLINE(Condition NegateCondition(Condition cc));
+inline Condition NegateCondition(Condition cc) {
+  ASSERT(cc != al);
+  return static_cast<Condition>(cc ^ ne);
+}
 
 
 // Corresponds to transposing the operands of a comparison.
@@ -418,7 +435,18 @@ class Operand BASE_EMBEDDED {
   // Return true if this is a register operand.
   INLINE(bool is_reg() const);
 
+  // Return true of this operand fits in one instruction so that no
+  // 2-instruction solution with a load into the ip register is necessary.
+  bool is_single_instruction() const;
+
+  inline int32_t immediate() const {
+    ASSERT(!rm_.is_valid());
+    return imm32_;
+  }
+
   Register rm() const { return rm_; }
+  Register rs() const { return rs_; }
+  ShiftOp shift_op() const { return shift_op_; }
 
  private:
   Register rm_;
@@ -532,6 +560,27 @@ extern const Instr kLdrPCPattern;
 extern const Instr kBlxRegMask;
 extern const Instr kBlxRegPattern;
 
+extern const Instr kMovMvnMask;
+extern const Instr kMovMvnPattern;
+extern const Instr kMovMvnFlip;
+
+extern const Instr kMovLeaveCCMask;
+extern const Instr kMovLeaveCCPattern;
+extern const Instr kMovwMask;
+extern const Instr kMovwPattern;
+extern const Instr kMovwLeaveCCFlip;
+
+extern const Instr kCmpCmnMask;
+extern const Instr kCmpCmnPattern;
+extern const Instr kCmpCmnFlip;
+
+extern const Instr kALUMask;
+extern const Instr kAddPattern;
+extern const Instr kSubPattern;
+extern const Instr kAndPattern;
+extern const Instr kBicPattern;
+extern const Instr kAddSubFlip;
+extern const Instr kAndBicFlip;
 
 class Assembler : public Malloced {
  public:
@@ -629,22 +678,39 @@ class Assembler : public Malloced {
   // Distance between start of patched return sequence and the emitted address
   // to jump to.
 #ifdef USE_BLX
-  // Return sequence is:
+  // Patched return sequence is:
   //  ldr  ip, [pc, #0]   @ emited address and start
   //  blx  ip
   static const int kPatchReturnSequenceAddressOffset =  0 * kInstrSize;
 #else
-  // Return sequence is:
+  // Patched return sequence is:
   //  mov  lr, pc         @ start of sequence
   //  ldr  pc, [pc, #-4]  @ emited address
   static const int kPatchReturnSequenceAddressOffset =  kInstrSize;
+#endif
+
+  // Distance between start of patched debug break slot and the emitted address
+  // to jump to.
+#ifdef USE_BLX
+  // Patched debug break slot code is:
+  //  ldr  ip, [pc, #0]   @ emited address and start
+  //  blx  ip
+  static const int kPatchDebugBreakSlotAddressOffset =  0 * kInstrSize;
+#else
+  // Patched debug break slot code is:
+  //  mov  lr, pc         @ start of sequence
+  //  ldr  pc, [pc, #-4]  @ emited address
+  static const int kPatchDebugBreakSlotAddressOffset =  kInstrSize;
 #endif
 
   // Difference between address of current opcode and value read from pc
   // register.
   static const int kPcLoadDelta = 8;
 
-  static const int kJSReturnSequenceLength = 4;
+  static const int kJSReturnSequenceInstructions = 4;
+  static const int kDebugBreakSlotInstructions = 3;
+  static const int kDebugBreakSlotLength =
+      kDebugBreakSlotInstructions * kInstrSize;
 
   // ---------------------------------------------------------------------------
   // Code generation
@@ -653,6 +719,8 @@ class Assembler : public Malloced {
   // possible to align the pc offset to a multiple
   // of m. m must be a power of 2 (>= 4).
   void Align(int m);
+  // Aligns code to something that's optimal for a jump target for the platform.
+  void CodeTargetAlign();
 
   // Branch instructions
   void b(int branch_offset, Condition cond = al);
@@ -690,6 +758,10 @@ class Assembler : public Malloced {
 
   void add(Register dst, Register src1, const Operand& src2,
            SBit s = LeaveCC, Condition cond = al);
+  void add(Register dst, Register src1, Register src2,
+           SBit s = LeaveCC, Condition cond = al) {
+    add(dst, src1, Operand(src2), s, cond);
+  }
 
   void adc(Register dst, Register src1, const Operand& src2,
            SBit s = LeaveCC, Condition cond = al);
@@ -727,6 +799,13 @@ class Assembler : public Malloced {
     mov(dst, Operand(src), s, cond);
   }
 
+  // ARMv7 instructions for loading a 32 bit immediate in two instructions.
+  // This may actually emit a different mov instruction, but on an ARMv7 it
+  // is guaranteed to only emit one instruction.
+  void movw(Register reg, uint32_t immediate, Condition cond = al);
+  // The constant for movt should be in the range 0-0xffff.
+  void movt(Register reg, uint32_t immediate, Condition cond = al);
+
   void bic(Register dst, Register src1, const Operand& src2,
            SBit s = LeaveCC, Condition cond = al);
 
@@ -756,6 +835,25 @@ class Assembler : public Malloced {
   // Miscellaneous arithmetic instructions
 
   void clz(Register dst, Register src, Condition cond = al);  // v5 and above
+
+  // Saturating instructions. v6 and above.
+
+  // Unsigned saturate.
+  //
+  // Saturate an optionally shifted signed value to an unsigned range.
+  //
+  //   usat dst, #satpos, src
+  //   usat dst, #satpos, src, lsl #sh
+  //   usat dst, #satpos, src, asr #sh
+  //
+  // Register dst will contain:
+  //
+  //   0,                 if s < 0
+  //   (1 << satpos) - 1, if s > ((1 << satpos) - 1)
+  //   s,                 otherwise
+  //
+  // where s is the contents of src after shifting (if used.)
+  void usat(Register dst, int satpos, const Operand& src, Condition cond = al);
 
   // Bitfield manipulation instructions. v7 and above.
 
@@ -867,6 +965,16 @@ class Assembler : public Malloced {
             const Register base,
             int offset,  // Offset must be a multiple of 4.
             const Condition cond = al);
+
+  void vmov(const DwVfpRegister dst,
+            double imm,
+            const Condition cond = al);
+  void vmov(const SwVfpRegister dst,
+            const SwVfpRegister src,
+            const Condition cond = al);
+  void vmov(const DwVfpRegister dst,
+            const DwVfpRegister src,
+            const Condition cond = al);
   void vmov(const DwVfpRegister dst,
             const Register src1,
             const Register src2,
@@ -925,6 +1033,9 @@ class Assembler : public Malloced {
             const Condition cond = al);
   void vmrs(const Register dst,
             const Condition cond = al);
+  void vsqrt(const DwVfpRegister dst,
+             const DwVfpRegister src,
+             const Condition cond = al);
 
   // Pseudo instructions
   void nop(int type = 0);
@@ -977,13 +1088,16 @@ class Assembler : public Malloced {
   // Mark address of the ExitJSFrame code.
   void RecordJSReturn();
 
+  // Mark address of a debug break slot.
+  void RecordDebugBreakSlot();
+
   // Record a comment relocation entry that can be used by a disassembler.
   // Use --debug_code to enable.
   void RecordComment(const char* msg);
 
   void RecordPosition(int pos);
   void RecordStatementPosition(int pos);
-  void WriteRecordedPositions();
+  bool WriteRecordedPositions();
 
   int pc_offset() const { return pc_ - buffer_; }
   int current_position() const { return current_position_; }
@@ -1006,6 +1120,10 @@ class Assembler : public Malloced {
   static bool IsLdrRegisterImmediate(Instr instr);
   static int GetLdrRegisterImmediateOffset(Instr instr);
   static Instr SetLdrRegisterImmediateOffset(Instr instr, int offset);
+  static bool IsStrRegisterImmediate(Instr instr);
+  static Instr SetStrRegisterImmediateOffset(Instr instr, int offset);
+  static bool IsAddRegisterImmediate(Instr instr);
+  static Instr SetAddRegisterImmediateOffset(Instr instr, int offset);
   static Register GetRd(Instr instr);
   static bool IsPush(Instr instr);
   static bool IsPop(Instr instr);
@@ -1044,6 +1162,7 @@ class Assembler : public Malloced {
   void EndBlockConstPool() {
     const_pool_blocked_nesting_--;
   }
+  bool is_const_pool_blocked() const { return const_pool_blocked_nesting_ > 0; }
 
  private:
   // Code buffer:

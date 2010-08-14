@@ -75,28 +75,10 @@
 
 // Mode to overwrite BinaryExpression values.
 enum OverwriteMode { NO_OVERWRITE, OVERWRITE_LEFT, OVERWRITE_RIGHT };
+enum UnaryOverwriteMode { UNARY_OVERWRITE, UNARY_NO_OVERWRITE };
 
 // Types of uncatchable exceptions.
 enum UncatchableExceptionType { OUT_OF_MEMORY, TERMINATION };
-
-
-#if V8_TARGET_ARCH_IA32
-#include "ia32/codegen-ia32.h"
-#elif V8_TARGET_ARCH_X64
-#include "x64/codegen-x64.h"
-#elif V8_TARGET_ARCH_ARM
-#include "arm/codegen-arm.h"
-#elif V8_TARGET_ARCH_MIPS
-#include "mips/codegen-mips.h"
-#else
-#error Unsupported target architecture.
-#endif
-
-#include "register-allocator.h"
-
-namespace v8 {
-namespace internal {
-
 
 #define INLINE_RUNTIME_FUNCTION_LIST(F) \
   F(IsSmi, 1, 1)                                                             \
@@ -119,6 +101,7 @@ namespace internal {
   F(IsObject, 1, 1)                                                          \
   F(IsFunction, 1, 1)                                                        \
   F(IsUndetectableObject, 1, 1)                                              \
+  F(IsSpecObject, 1, 1)                                            \
   F(StringAdd, 2, 1)                                                         \
   F(SubString, 3, 1)                                                         \
   F(StringCompare, 2, 1)                                                     \
@@ -130,8 +113,26 @@ namespace internal {
   F(MathPow, 2, 1)                                                           \
   F(MathSin, 1, 1)                                                           \
   F(MathCos, 1, 1)                                                           \
-  F(MathSqrt, 1, 1)
+  F(MathSqrt, 1, 1)                                                          \
+  F(IsRegExpEquivalent, 2, 1)
 
+
+#if V8_TARGET_ARCH_IA32
+#include "ia32/codegen-ia32.h"
+#elif V8_TARGET_ARCH_X64
+#include "x64/codegen-x64.h"
+#elif V8_TARGET_ARCH_ARM
+#include "arm/codegen-arm.h"
+#elif V8_TARGET_ARCH_MIPS
+#include "mips/codegen-mips.h"
+#else
+#error Unsupported target architecture.
+#endif
+
+#include "register-allocator.h"
+
+namespace v8 {
+namespace internal {
 
 // Support for "structured" code comments.
 #ifdef DEBUG
@@ -178,7 +179,6 @@ class CodeGeneratorScope BASE_EMBEDDED {
   static CodeGenerator* top_;
   CodeGenerator* previous_;
 };
-
 
 #if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64
 
@@ -414,21 +414,33 @@ class InstanceofStub: public CodeStub {
 };
 
 
+enum NegativeZeroHandling {
+  kStrictNegativeZero,
+  kIgnoreNegativeZero
+};
+
+
 class GenericUnaryOpStub : public CodeStub {
  public:
-  GenericUnaryOpStub(Token::Value op, bool overwrite)
-      : op_(op), overwrite_(overwrite) { }
+  GenericUnaryOpStub(Token::Value op,
+                     UnaryOverwriteMode overwrite,
+                     NegativeZeroHandling negative_zero = kStrictNegativeZero)
+      : op_(op), overwrite_(overwrite), negative_zero_(negative_zero) { }
 
  private:
   Token::Value op_;
-  bool overwrite_;
+  UnaryOverwriteMode overwrite_;
+  NegativeZeroHandling negative_zero_;
 
-  class OverwriteField: public BitField<int, 0, 1> {};
-  class OpField: public BitField<Token::Value, 1, kMinorBits - 1> {};
+  class OverwriteField: public BitField<UnaryOverwriteMode, 0, 1> {};
+  class NegativeZeroField: public BitField<NegativeZeroHandling, 1, 1> {};
+  class OpField: public BitField<Token::Value, 2, kMinorBits - 2> {};
 
   Major MajorKey() { return GenericUnaryOp; }
   int MinorKey() {
-    return OpField::encode(op_) | OverwriteField::encode(overwrite_);
+    return OpField::encode(op_) |
+           OverwriteField::encode(overwrite_) |
+           NegativeZeroField::encode(negative_zero_);
   }
 
   void Generate(MacroAssembler* masm);
@@ -448,11 +460,15 @@ class CompareStub: public CodeStub {
   CompareStub(Condition cc,
               bool strict,
               NaNInformation nan_info = kBothCouldBeNaN,
-              bool include_number_compare = true) :
+              bool include_number_compare = true,
+              Register lhs = no_reg,
+              Register rhs = no_reg) :
       cc_(cc),
       strict_(strict),
       never_nan_nan_(nan_info == kCantBothBeNaN),
       include_number_compare_(include_number_compare),
+      lhs_(lhs),
+      rhs_(rhs),
       name_(NULL) { }
 
   void Generate(MacroAssembler* masm);
@@ -470,12 +486,19 @@ class CompareStub: public CodeStub {
   // comparison code is used when the number comparison has been inlined, and
   // the stub will be called if one of the operands is not a number.
   bool include_number_compare_;
+  // Register holding the left hand side of the comparison if the stub gives
+  // a choice, no_reg otherwise.
+  Register lhs_;
+  // Register holding the right hand side of the comparison if the stub gives
+  // a choice, no_reg otherwise.
+  Register rhs_;
 
-  // Encoding of the minor key CCCCCCCCCCCCCCNS.
+  // Encoding of the minor key CCCCCCCCCCCCRCNS.
   class StrictField: public BitField<bool, 0, 1> {};
   class NeverNanNanField: public BitField<bool, 1, 1> {};
   class IncludeNumberCompareField: public BitField<bool, 2, 1> {};
-  class ConditionField: public BitField<int, 3, 13> {};
+  class RegisterField: public BitField<bool, 3, 1> {};
+  class ConditionField: public BitField<int, 4, 12> {};
 
   Major MajorKey() { return Compare; }
 
@@ -494,11 +517,17 @@ class CompareStub: public CodeStub {
 #ifdef DEBUG
   void Print() {
     PrintF("CompareStub (cc %d), (strict %s), "
-           "(never_nan_nan %s), (number_compare %s)\n",
+           "(never_nan_nan %s), (number_compare %s) ",
            static_cast<int>(cc_),
            strict_ ? "true" : "false",
            never_nan_nan_ ? "true" : "false",
            include_number_compare_ ? "included" : "not included");
+
+    if (!lhs_.is(no_reg) && !rhs_.is(no_reg)) {
+      PrintF("(lhs r%d), (rhs r%d)\n", lhs_.code(), rhs_.code());
+    } else {
+      PrintF("\n");
+    }
   }
 #endif
 };

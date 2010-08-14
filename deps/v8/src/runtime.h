@@ -72,6 +72,7 @@ namespace internal {
   F(GetOwnProperty, 2, 1) \
   \
   F(IsExtensible, 1, 1) \
+  F(PreventExtensions, 1, 1)\
   \
   /* Utilities */ \
   F(GetFunctionDelegate, 1, 1) \
@@ -79,6 +80,7 @@ namespace internal {
   F(NewArgumentsFast, 3, 1) \
   F(LazyCompile, 1, 1) \
   F(SetNewFunctionAttributes, 1, 1) \
+  F(AllocateInNewSpace, 1, 1) \
   \
   /* Array join support */ \
   F(PushIfAbsent, 2, 1) \
@@ -114,6 +116,7 @@ namespace internal {
   F(NumberDiv, 2, 1) \
   F(NumberMod, 2, 1) \
   F(NumberUnaryMinus, 1, 1) \
+  F(NumberAlloc, 0, 1) \
   \
   F(StringAdd, 2, 1) \
   F(StringBuilderConcat, 3, 1) \
@@ -162,7 +165,6 @@ namespace internal {
   \
   /* Strings */ \
   F(StringCharCodeAt, 2, 1) \
-  F(StringCharAt, 2, 1) \
   F(StringIndexOf, 3, 1) \
   F(StringLastIndexOf, 3, 1) \
   F(StringLocaleCompare, 2, 1) \
@@ -223,6 +225,7 @@ namespace internal {
   /* Eval */ \
   F(GlobalReceiver, 1, 1) \
   F(ResolvePossiblyDirectEval, 3, 2) \
+  F(ResolvePossiblyDirectEvalNoLookup, 3, 2) \
   \
   F(SetProperty, -1 /* 3 or 4 */, 1) \
   F(DefineOrRedefineDataProperty, 4, 1) \
@@ -256,6 +259,7 @@ namespace internal {
   /* Statements */ \
   F(NewClosure, 2, 1) \
   F(NewObject, 1, 1) \
+  F(NewObjectFromBound, 2, 1) \
   F(Throw, 1, 1) \
   F(ReThrow, 1, 1) \
   F(ThrowReferenceError, 1, 1) \
@@ -319,6 +323,7 @@ namespace internal {
   F(GetCFrames, 1, 1) \
   F(GetThreadCount, 1, 1) \
   F(GetThreadDetails, 2, 1) \
+  F(SetDisableBreak, 1, 1) \
   F(GetBreakLocations, 1, 1) \
   F(SetFunctionBreakPoint, 3, 1) \
   F(SetScriptBreakPoint, 3, 1) \

@@ -126,7 +126,7 @@ function RegExpCache() {
   this.regExp = 0;
   this.subject = 0;
   this.replaceString = 0;
-  this.lastIndex = 0;
+  this.lastIndex = 0;  // Also used for splitLimit when type is "split"
   this.answer = 0;
   // answerSaved marks whether the contents of answer is valid for a cache
   // hit in RegExpExec, StringMatch and StringSplit.
@@ -194,7 +194,7 @@ function RegExpExec(string) {
 
   if (%_ObjectEquals(cache.type, 'exec') &&
       %_ObjectEquals(cache.lastIndex, this.lastIndex) &&
-      %_ObjectEquals(cache.regExp, this) &&
+      %_IsRegExpEquivalent(cache.regExp, this) &&
       %_ObjectEquals(cache.subject, string)) {
     if (cache.answerSaved) {
       return CloneRegExpResult(cache.answer);
@@ -230,7 +230,10 @@ function RegExpExec(string) {
   var matchIndices = %_RegExpExec(this, s, i, lastMatchInfo);
 
   if (matchIndices == null) {
-    if (this.global) this.lastIndex = 0;
+    if (this.global) {
+      this.lastIndex = 0;
+      if (lastIndex != 0) return matchIndices;
+    }
     cache.lastIndex = lastIndex;
     cache.regExp = this;
     cache.subject = s;
@@ -257,6 +260,10 @@ function RegExpExec(string) {
 }
 
 
+// One-element cache for the simplified test regexp.
+var regexp_key;
+var regexp_val;
+
 // Section 15.10.6.3 doesn't actually make sense, but the intention seems to be
 // that test is defined in terms of String.prototype.exec. However, it probably
 // means the original value of String.prototype.exec, which is what everybody
@@ -281,14 +288,28 @@ function RegExpTest(string) {
   }
 
   var lastIndex = this.lastIndex;
-
   var cache = regExpCache;
-
   if (%_ObjectEquals(cache.type, 'test') &&
-      %_ObjectEquals(cache.regExp, this) &&
+      %_IsRegExpEquivalent(cache.regExp, this) &&
       %_ObjectEquals(cache.subject, string) &&
       %_ObjectEquals(cache.lastIndex, lastIndex)) {
     return cache.answer;
+  }
+
+  // Remove irrelevant preceeding '.*' in a test regexp. The expression
+  // checks whether this.source starts with '.*' and that the third
+  // char is not a '?'
+  if (%_StringCharCodeAt(this.source,0) == 46 && // '.'
+      %_StringCharCodeAt(this.source,1) == 42 && // '*'
+      %_StringCharCodeAt(this.source,2) != 63) { // '?'
+    if (!%_ObjectEquals(regexp_key, this)) {
+      regexp_key = this;
+      regexp_val = new $RegExp(this.source.substring(2, this.source.length),
+                               (this.global ? 'g' : '')
+                               + (this.ignoreCase ? 'i' : '')
+                               + (this.multiline ? 'm' : ''));
+    }
+    if (!regexp_val.test(s)) return false;
   }
 
   var length = s.length;
@@ -299,7 +320,7 @@ function RegExpTest(string) {
   cache.subject = s;
   cache.lastIndex = i;
 
-  if (i < 0 || i > s.length) {
+  if (i < 0 || i > length) {
     this.lastIndex = 0;
     cache.answer = false;
     return false;

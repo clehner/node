@@ -1,11 +1,11 @@
-require('../common');
+common = require("../common");
+assert = common.assert
 
-sys = require('sys');
 http = require('http');
 assert = require('assert');
 
 server = http.createServer(function (request, response) {
-  sys.puts('responding to ' + request.url);
+  console.log('responding to ' + request.url);
 
   response.writeHead(200, {'Content-Type': 'text/plain'});
   response.write('1\n');
@@ -16,7 +16,6 @@ server = http.createServer(function (request, response) {
 
   this.close();
 })
-server.listen(PORT);
 
 var response="";
 
@@ -25,8 +24,8 @@ process.addListener('exit', function () {
 });
 
 
-server.addListener('listening', function () {
-  var client = http.createClient(PORT);
+server.listen(common.PORT, function () {
+  var client = http.createClient(common.PORT);
   var req = client.request("/");
   req.end();
   req.addListener('response', function (res) {
@@ -35,7 +34,7 @@ server.addListener('listening', function () {
     res.addListener('data', function (chunk) {
       response += chunk;
     });
-    sys.error("Got /hello response");
+    common.error("Got /hello response");
   });
 });
 

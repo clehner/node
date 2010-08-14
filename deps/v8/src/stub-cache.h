@@ -77,7 +77,7 @@ class StubCache : public AllStatic {
                                         JSObject* receiver,
                                         JSObject* holder);
 
-  static Object* ComputeLoadNormal(String* name, JSObject* receiver);
+  static Object* ComputeLoadNormal();
 
 
   static Object* ComputeLoadGlobal(String* name,
@@ -121,6 +121,8 @@ class StubCache : public AllStatic {
                                    int field_index,
                                    Map* transition = NULL);
 
+  static Object* ComputeStoreNormal();
+
   static Object* ComputeStoreGlobal(String* name,
                                     GlobalObject* receiver,
                                     JSGlobalPropertyCell* cell);
@@ -142,6 +144,7 @@ class StubCache : public AllStatic {
 
   static Object* ComputeCallField(int argc,
                                   InLoopFlag in_loop,
+                                  Code::Kind,
                                   String* name,
                                   Object* object,
                                   JSObject* holder,
@@ -149,6 +152,7 @@ class StubCache : public AllStatic {
 
   static Object* ComputeCallConstant(int argc,
                                      InLoopFlag in_loop,
+                                     Code::Kind,
                                      String* name,
                                      Object* object,
                                      JSObject* holder,
@@ -156,16 +160,19 @@ class StubCache : public AllStatic {
 
   static Object* ComputeCallNormal(int argc,
                                    InLoopFlag in_loop,
+                                   Code::Kind,
                                    String* name,
                                    JSObject* receiver);
 
   static Object* ComputeCallInterceptor(int argc,
+                                        Code::Kind,
                                         String* name,
                                         Object* object,
                                         JSObject* holder);
 
   static Object* ComputeCallGlobal(int argc,
                                    InLoopFlag in_loop,
+                                   Code::Kind,
                                    String* name,
                                    JSObject* receiver,
                                    GlobalObject* holder,
@@ -174,18 +181,33 @@ class StubCache : public AllStatic {
 
   // ---
 
-  static Object* ComputeCallInitialize(int argc, InLoopFlag in_loop);
-  static Object* ComputeCallPreMonomorphic(int argc, InLoopFlag in_loop);
-  static Object* ComputeCallNormal(int argc, InLoopFlag in_loop);
-  static Object* ComputeCallMegamorphic(int argc, InLoopFlag in_loop);
-  static Object* ComputeCallMiss(int argc);
+  static Object* ComputeCallInitialize(int argc,
+                                       InLoopFlag in_loop,
+                                       Code::Kind kind);
+
+  static Object* ComputeCallPreMonomorphic(int argc,
+                                           InLoopFlag in_loop,
+                                           Code::Kind kind);
+
+  static Object* ComputeCallNormal(int argc,
+                                   InLoopFlag in_loop,
+                                   Code::Kind kind);
+
+  static Object* ComputeCallMegamorphic(int argc,
+                                        InLoopFlag in_loop,
+                                        Code::Kind kind);
+
+  static Object* ComputeCallMiss(int argc, Code::Kind kind);
 
   // Finds the Code object stored in the Heap::non_monomorphic_cache().
-  static Code* FindCallInitialize(int argc, InLoopFlag in_loop);
+  static Code* FindCallInitialize(int argc,
+                                  InLoopFlag in_loop,
+                                  Code::Kind kind);
 
 #ifdef ENABLE_DEBUGGER_SUPPORT
-  static Object* ComputeCallDebugBreak(int argc);
-  static Object* ComputeCallDebugPrepareStepIn(int argc);
+  static Object* ComputeCallDebugBreak(int argc, Code::Kind kind);
+
+  static Object* ComputeCallDebugPrepareStepIn(int argc, Code::Kind kind);
 #endif
 
   static Object* ComputeLazyCompile(int argc);
@@ -196,9 +218,6 @@ class StubCache : public AllStatic {
 
   // Clear the lookup table (@ mark compact collection).
   static void Clear();
-
-  // Functions for generating stubs at startup.
-  static void GenerateMiss(MacroAssembler* masm);
 
   // Generate code for probing the stub cache table.
   // If extra != no_reg it might be used as am extra scratch register.
@@ -317,10 +336,6 @@ Object* CallInterceptorProperty(Arguments args);
 Object* KeyedLoadPropertyWithInterceptor(Arguments args);
 
 
-// Support function for computing call IC miss stubs.
-Handle<Code> ComputeCallMiss(int argc);
-
-
 // The stub compiler compiles stubs for the stub cache.
 class StubCompiler BASE_EMBEDDED {
  public:
@@ -348,6 +363,15 @@ class StubCompiler BASE_EMBEDDED {
   static void GenerateLoadGlobalFunctionPrototype(MacroAssembler* masm,
                                                   int index,
                                                   Register prototype);
+
+  // Generates prototype loading code that uses the objects from the
+  // context we were in when this function was called.  This ties the
+  // generated code to a particular context and so must not be used in
+  // cases where the generated code is not allowed to have references
+  // to objects from a context.
+  static void GenerateDirectLoadGlobalFunctionPrototype(MacroAssembler* masm,
+                                                        int index,
+                                                        Register prototype);
 
   static void GenerateFastPropertyLoad(MacroAssembler* masm,
                                        Register dst, Register src,
@@ -381,25 +405,40 @@ class StubCompiler BASE_EMBEDDED {
 
   static void GenerateLoadMiss(MacroAssembler* masm, Code::Kind kind);
 
-  // Check the integrity of the prototype chain to make sure that the
-  // current IC is still valid.
+  // Generates code that verifies that the property holder has not changed
+  // (checking maps of objects in the prototype chain for fast and global
+  // objects or doing negative lookup for slow objects, ensures that the
+  // property cells for global objects are still empty) and checks that the map
+  // of the holder has not changed. If necessary the function also generates
+  // code for security check in case of global object holders. Helps to make
+  // sure that the current IC is still valid.
+  //
+  // The scratch and holder registers are always clobbered, but the object
+  // register is only clobbered if it the same as the holder register. The
+  // function returns a register containing the holder - either object_reg or
+  // holder_reg.
+  // The function can optionally (when save_at_depth !=
+  // kInvalidProtoDepth) save the object at the given depth by moving
+  // it to [esp + kPointerSize].
 
   Register CheckPrototypes(JSObject* object,
                            Register object_reg,
                            JSObject* holder,
                            Register holder_reg,
-                           Register scratch,
+                           Register scratch1,
+                           Register scratch2,
                            String* name,
                            Label* miss) {
-    return CheckPrototypes(object, object_reg, holder, holder_reg, scratch,
-                           name, kInvalidProtoDepth, miss);
+    return CheckPrototypes(object, object_reg, holder, holder_reg, scratch1,
+                           scratch2, name, kInvalidProtoDepth, miss);
   }
 
   Register CheckPrototypes(JSObject* object,
                            Register object_reg,
                            JSObject* holder,
                            Register holder_reg,
-                           Register scratch,
+                           Register scratch1,
+                           Register scratch2,
                            String* name,
                            int save_at_depth,
                            Label* miss);
@@ -416,6 +455,7 @@ class StubCompiler BASE_EMBEDDED {
                          Register receiver,
                          Register scratch1,
                          Register scratch2,
+                         Register scratch3,
                          int index,
                          String* name,
                          Label* miss);
@@ -426,6 +466,7 @@ class StubCompiler BASE_EMBEDDED {
                             Register name_reg,
                             Register scratch1,
                             Register scratch2,
+                            Register scratch3,
                             AccessorInfo* callback,
                             String* name,
                             Label* miss,
@@ -436,6 +477,7 @@ class StubCompiler BASE_EMBEDDED {
                             Register receiver,
                             Register scratch1,
                             Register scratch2,
+                            Register scratch3,
                             Object* value,
                             String* name,
                             Label* miss);
@@ -447,6 +489,7 @@ class StubCompiler BASE_EMBEDDED {
                                Register name_reg,
                                Register scratch1,
                                Register scratch2,
+                               Register scratch3,
                                String* name,
                                Label* miss);
 
@@ -585,8 +628,10 @@ class CallStubCompiler: public StubCompiler {
     kNumCallGenerators
   };
 
-  CallStubCompiler(int argc, InLoopFlag in_loop)
-      : arguments_(argc), in_loop_(in_loop) { }
+  CallStubCompiler(int argc,
+                   InLoopFlag in_loop,
+                   Code::Kind kind,
+                   InlineCacheHolderFlag cache_holder);
 
   Object* CompileCallField(JSObject* object,
                            JSObject* holder,
@@ -626,6 +671,8 @@ class CallStubCompiler: public StubCompiler {
  private:
   const ParameterCount arguments_;
   const InLoopFlag in_loop_;
+  const Code::Kind kind_;
+  const InlineCacheHolderFlag cache_holder_;
 
   const ParameterCount& arguments() { return arguments_; }
 
@@ -634,6 +681,12 @@ class CallStubCompiler: public StubCompiler {
   // Convenience function. Calls GetCode above passing
   // CONSTANT_FUNCTION type and the name of the given function.
   Object* GetCode(JSFunction* function);
+
+  void GenerateNameCheck(String* name, Label* miss);
+
+  // Generates a jump to CallIC miss stub. Returns Failure if the jump cannot
+  // be generated.
+  Object* GenerateMissBranch();
 };
 
 

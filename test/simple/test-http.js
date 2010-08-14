@@ -1,9 +1,10 @@
-require("../common");
+common = require("../common");
+assert = common.assert
 http = require("http");
 url = require("url");
 
 function p (x) {
-  error(inspect(x));
+  common.error(common.inspect(x));
 }
 
 var responses_sent = 0;
@@ -11,7 +12,7 @@ var responses_recvd = 0;
 var body0 = "";
 var body1 = "";
 
-http.createServer(function (req, res) {
+var server = http.createServer(function (req, res) {
   if (responses_sent == 0) {
     assert.equal("GET", req.method);
     assert.equal("/hello", url.parse(req.url).pathname);
@@ -38,36 +39,39 @@ http.createServer(function (req, res) {
   });
 
   //assert.equal("127.0.0.1", res.connection.remoteAddress);
-}).listen(PORT);
-
-var client = http.createClient(PORT);
-var req = client.request("/hello", {"Accept": "*/*", "Foo": "bar"});
-req.end();
-req.addListener('response', function (res) {
-  assert.equal(200, res.statusCode);
-  responses_recvd += 1;
-  res.setEncoding("utf8");
-  res.addListener('data', function (chunk) { body0 += chunk; });
-  debug("Got /hello response");
 });
+server.listen(common.PORT);
 
-setTimeout(function () {
-  req = client.request("POST", "/world");
-  req.addListener('response',function (res) {
+server.addListener("listening", function() {
+  var client = http.createClient(common.PORT);
+  var req = client.request("/hello", {"Accept": "*/*", "Foo": "bar"});
+  req.end();
+  req.addListener('response', function (res) {
     assert.equal(200, res.statusCode);
     responses_recvd += 1;
-    res.setBodyEncoding("utf8");
-    res.addListener('data', function (chunk) { body1 += chunk; });
-    debug("Got /world response");
+    res.setEncoding("utf8");
+    res.addListener('data', function (chunk) { body0 += chunk; });
+    common.debug("Got /hello response");
   });
-  req.end();
-}, 1);
+
+  setTimeout(function () {
+    req = client.request("POST", "/world");
+    req.end();
+    req.addListener('response',function (res) {
+      assert.equal(200, res.statusCode);
+      responses_recvd += 1;
+      res.setEncoding("utf8");
+      res.addListener('data', function (chunk) { body1 += chunk; });
+      common.debug("Got /world response");
+    });
+  }, 1);
+});
 
 process.addListener("exit", function () {
-  debug("responses_recvd: " + responses_recvd);
+  common.debug("responses_recvd: " + responses_recvd);
   assert.equal(2, responses_recvd);
 
-  debug("responses_sent: " + responses_sent);
+  common.debug("responses_sent: " + responses_sent);
   assert.equal(2, responses_sent);
 
   assert.equal("The path was /hello", body0);

@@ -1,7 +1,8 @@
-require("../common");
+common = require("../common");
+assert = common.assert
 var path = require('path');
 var spawn = require('child_process').spawn;
-var sub = path.join(fixturesDir, 'print-chars.js');
+var sub = path.join(common.fixturesDir, 'print-chars.js');
 
 n = 500000;
 
@@ -11,17 +12,17 @@ var count = 0;
 
 child.stderr.setEncoding('utf8');
 child.stderr.addListener("data", function (data) {
-  puts("parent stderr: " + data);
+  console.log("parent stderr: " + data);
   assert.ok(false);
 });
 
 child.stderr.setEncoding('utf8');
 child.stdout.addListener("data", function (data) {
   count += data.length;
-  puts(count);
+  console.log(count);
 });
 
 child.addListener("exit", function (data) {
   assert.equal(n, count);
-  puts("okay");
+  console.log("okay");
 });

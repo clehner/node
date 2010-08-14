@@ -1,9 +1,10 @@
-require("../common");
+common = require("../common");
+assert = common.assert
 var path = require('path');
 var fs = require('fs');
 
 var got_error = false,
-    readdirDir = path.join(fixturesDir, "readdir")
+    readdirDir = path.join(common.fixturesDir, "readdir")
 
 var files = ['are'
             , 'dir'
@@ -16,16 +17,16 @@ var files = ['are'
             ];
 
 
-puts('readdirSync ' + readdirDir);
+console.log('readdirSync ' + readdirDir);
 var f = fs.readdirSync(readdirDir);
 p(f);
 assert.deepEqual(files, f.sort());
 
 
-puts("readdir " + readdirDir);
+console.log("readdir " + readdirDir);
 fs.readdir(readdirDir, function (err, f) {
   if (err) {
-    puts("error");
+    console.log("error");
     got_error = true;
   } else {
     p(f);
@@ -35,5 +36,5 @@ fs.readdir(readdirDir, function (err, f) {
 
 process.addListener("exit", function () {
   assert.equal(false, got_error);
-  puts("exit");
+  console.log("exit");
 });

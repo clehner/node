@@ -1,5 +1,6 @@
 var path = require("path");
-require("../common");
+common = require("../common");
+assert = common.assert
 
 var f = __filename;
 
@@ -7,10 +8,13 @@ assert.equal(path.basename(f), "test-path.js");
 assert.equal(path.basename(f, ".js"), "test-path");
 assert.equal(path.extname(f), ".js");
 assert.equal(path.dirname(f).substr(-11), "test/simple");
+assert.equal(path.dirname("/a/b/"), "/a");
 assert.equal(path.dirname("/a/b"), "/a");
 assert.equal(path.dirname("/a"), "/");
 assert.equal(path.dirname("/"), "/");
 path.exists(f, function (y) { assert.equal(y, true) });
+
+assert.equal(path.existsSync(f), true);
 
 assert.equal(path.extname(""), "");
 assert.equal(path.extname("/path/to/file"), "");
@@ -34,9 +38,11 @@ assert.equal(path.extname("file.ext.ext"), ".ext");
 assert.equal(path.extname("file."), ".");
 
 assert.equal(path.join(".", "fixtures/b", "..", "/b/c.js"), "fixtures/b/c.js");
+assert.equal(path.join("/foo", "../../../bar"), "/bar");
 
 assert.equal(path.normalize("./fixtures///b/../b/c.js"), "fixtures/b/c.js");
 assert.equal(path.normalize("./fixtures///b/../b/c.js",true), "fixtures///b/c.js");
+assert.equal(path.normalize("/foo/../../../bar"), "/bar");
 
 assert.deepEqual(path.normalizeArray(["fixtures","b","","..","b","c.js"]), ["fixtures","b","c.js"]);
 assert.deepEqual(path.normalizeArray(["fixtures","","b","..","b","c.js"], true), ["fixtures","","b","c.js"]);

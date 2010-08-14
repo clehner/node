@@ -69,6 +69,27 @@ bool Debug::IsDebugBreakAtReturn(RelocInfo* rinfo) {
 }
 
 
+bool BreakLocationIterator::IsDebugBreakAtSlot() {
+  ASSERT(IsDebugBreakSlot());
+  // Check whether the debug break slot instructions have been patched.
+  return rinfo()->IsPatchedDebugBreakSlotSequence();
+}
+
+
+void BreakLocationIterator::SetDebugBreakAtSlot() {
+  ASSERT(IsDebugBreakSlot());
+  rinfo()->PatchCodeWithCall(
+      Debug::debug_break_slot()->entry(),
+      Assembler::kDebugBreakSlotLength - Assembler::kCallInstructionLength);
+}
+
+
+void BreakLocationIterator::ClearDebugBreakAtSlot() {
+  ASSERT(IsDebugBreakSlot());
+  rinfo()->PatchCode(original_rinfo()->pc(), Assembler::kDebugBreakSlotLength);
+}
+
+
 #define __ ACCESS_MASM(masm)
 
 
@@ -208,9 +229,30 @@ void Debug::GenerateStubNoRegistersDebugBreak(MacroAssembler* masm) {
 }
 
 
+void Debug::GenerateSlot(MacroAssembler* masm) {
+  // Generate enough nop's to make space for a call instruction.
+  Label check_codesize;
+  __ bind(&check_codesize);
+  __ RecordDebugBreakSlot();
+  for (int i = 0; i < Assembler::kDebugBreakSlotLength; i++) {
+    __ nop();
+  }
+  ASSERT_EQ(Assembler::kDebugBreakSlotLength,
+            masm->SizeOfCodeGeneratedSince(&check_codesize));
+}
+
+
+void Debug::GenerateSlotDebugBreak(MacroAssembler* masm) {
+  // In the places where a debug break slot is inserted no registers can contain
+  // object pointers.
+  Generate_DebugBreakCallHelper(masm, 0, true);
+}
+
+
 void Debug::GeneratePlainReturnLiveEdit(MacroAssembler* masm) {
   masm->ret(0);
 }
+
 
 // FrameDropper is a code replacement for a JavaScript frame with possibly
 // several frames above.
@@ -223,6 +265,10 @@ void Debug::GeneratePlainReturnLiveEdit(MacroAssembler* masm) {
 //   -- context
 //   -- frame base
 void Debug::GenerateFrameDropperLiveEdit(MacroAssembler* masm) {
+  ExternalReference restarter_frame_function_slot =
+      ExternalReference(Debug_Address::RestarterFrameFunctionPointer());
+  __ mov(Operand::StaticVariable(restarter_frame_function_slot), Immediate(0));
+
   // We do not know our frame height, but set esp based on ebp.
   __ lea(esp, Operand(ebp, -4 * kPointerSize));
 
@@ -246,8 +292,10 @@ void Debug::GenerateFrameDropperLiveEdit(MacroAssembler* masm) {
 #undef __
 
 
-void Debug::SetUpFrameDropperFrame(StackFrame* bottom_js_frame,
-                                   Handle<Code> code) {
+// TODO(LiveEdit): consider making it platform-independent.
+// TODO(LiveEdit): use more named constants instead of numbers.
+Object** Debug::SetUpFrameDropperFrame(StackFrame* bottom_js_frame,
+                                       Handle<Code> code) {
   ASSERT(bottom_js_frame->is_java_script());
 
   Address fp = bottom_js_frame->fp();
@@ -256,7 +304,10 @@ void Debug::SetUpFrameDropperFrame(StackFrame* bottom_js_frame,
 
   Memory::Object_at(fp - 3 * kPointerSize) = *code;
   Memory::Object_at(fp - 2 * kPointerSize) = Smi::FromInt(StackFrame::INTERNAL);
+
+  return reinterpret_cast<Object**>(&Memory::Object_at(fp - 4 * kPointerSize));
 }
+
 const int Debug::kFrameDropperFrameSize = 5;
 
 

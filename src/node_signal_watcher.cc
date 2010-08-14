@@ -22,7 +22,7 @@ void SignalWatcher::Initialize(Handle<Object> target) {
 
   target->Set(String::NewSymbol("SignalWatcher"),
       constructor_template->GetFunction());
-  
+
   callback_symbol = NODE_PSYMBOL("callback");
 }
 
@@ -96,3 +96,5 @@ void SignalWatcher::Stop () {
 }
 
 }  // namespace node
+
+NODE_MODULE(node_signal_watcher, node::SignalWatcher::Initialize);

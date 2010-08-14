@@ -77,7 +77,6 @@ static void CheckFindCodeObject() {
   CodeDesc desc;
   assm.GetCode(&desc);
   Object* code = Heap::CreateCode(desc,
-                                  NULL,
                                   Code::ComputeFlags(Code::STUB),
                                   Handle<Object>(Heap::undefined_value()));
   CHECK(code->IsCode());
@@ -91,7 +90,6 @@ static void CheckFindCodeObject() {
   }
 
   Object* copy = Heap::CreateCode(desc,
-                                  NULL,
                                   Code::ComputeFlags(Code::STUB),
                                   Handle<Object>(Heap::undefined_value()));
   CHECK(copy->IsCode());
@@ -324,8 +322,8 @@ static bool WeakPointerCleared = false;
 
 static void TestWeakGlobalHandleCallback(v8::Persistent<v8::Value> handle,
                                          void* id) {
-  USE(handle);
   if (1234 == reinterpret_cast<intptr_t>(id)) WeakPointerCleared = true;
+  handle.Dispose();
 }
 
 
@@ -400,17 +398,8 @@ TEST(WeakGlobalHandlesMark) {
 
   CHECK(WeakPointerCleared);
   CHECK(!GlobalHandles::IsNearDeath(h1.location()));
-  CHECK(GlobalHandles::IsNearDeath(h2.location()));
 
   GlobalHandles::Destroy(h1.location());
-  GlobalHandles::Destroy(h2.location());
-}
-
-static void TestDeleteWeakGlobalHandleCallback(
-    v8::Persistent<v8::Value> handle,
-    void* id) {
-  if (1234 == reinterpret_cast<intptr_t>(id)) WeakPointerCleared = true;
-  handle.Dispose();
 }
 
 TEST(DeleteWeakGlobalHandle) {
@@ -429,7 +418,7 @@ TEST(DeleteWeakGlobalHandle) {
 
   GlobalHandles::MakeWeak(h.location(),
                           reinterpret_cast<void*>(1234),
-                          &TestDeleteWeakGlobalHandleCallback);
+                          &TestWeakGlobalHandleCallback);
 
   // Scanvenge does not recognize weak reference.
   Heap::PerformScavenge();
@@ -956,4 +945,45 @@ TEST(Regression39128) {
   Page* page = Page::FromAddress(clone_addr);
   // Check that region covering inobject property 1 is marked dirty.
   CHECK(page->IsRegionDirty(clone_addr + (object_size - kPointerSize)));
+}
+
+TEST(TestCodeFlushing) {
+  i::FLAG_allow_natives_syntax = true;
+  // If we do not flush code this test is invalid.
+  if (!FLAG_flush_code) return;
+  InitializeVM();
+  v8::HandleScope scope;
+  const char* source = "function foo() {"
+                       "  var x = 42;"
+                       "  var y = 42;"
+                       "  var z = x + y;"
+                       "};"
+                       "foo()";
+  Handle<String> foo_name = Factory::LookupAsciiSymbol("foo");
+
+  // This compile will add the code to the compilation cache.
+  CompileRun(source);
+
+  // Check function is compiled.
+  Object* func_value = Top::context()->global()->GetProperty(*foo_name);
+  CHECK(func_value->IsJSFunction());
+  Handle<JSFunction> function(JSFunction::cast(func_value));
+  CHECK(function->shared()->is_compiled());
+
+  Heap::CollectAllGarbage(true);
+  Heap::CollectAllGarbage(true);
+
+  // foo should still be in the compilation cache and therefore not
+  // have been removed.
+  CHECK(function->shared()->is_compiled());
+  Heap::CollectAllGarbage(true);
+  Heap::CollectAllGarbage(true);
+  Heap::CollectAllGarbage(true);
+  Heap::CollectAllGarbage(true);
+
+  // foo should no longer be in the compilation cache
+  CHECK(!function->shared()->is_compiled());
+  // Call foo to get it recompiled.
+  CompileRun("foo()");
+  CHECK(function->shared()->is_compiled());
 }

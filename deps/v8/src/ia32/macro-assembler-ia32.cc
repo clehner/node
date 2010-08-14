@@ -98,13 +98,10 @@ void MacroAssembler::InNewSpace(Register object,
 }
 
 
-// For page containing |object| mark region covering [object+offset] dirty.
-// object is the object being stored into, value is the object being stored.
-// If offset is zero, then the scratch register contains the array index into
-// the elements array represented as a Smi.
-// All registers are clobbered by the operation.
-void MacroAssembler::RecordWrite(Register object, int offset,
-                                 Register value, Register scratch) {
+void MacroAssembler::RecordWrite(Register object,
+                                 int offset,
+                                 Register value,
+                                 Register scratch) {
   // The compiled code assumes that record write doesn't change the
   // context register, so we check that none of the clobbered
   // registers are esi.
@@ -149,6 +146,39 @@ void MacroAssembler::RecordWrite(Register object, int offset,
     mov(object, Immediate(BitCast<int32_t>(kZapValue)));
     mov(value, Immediate(BitCast<int32_t>(kZapValue)));
     mov(scratch, Immediate(BitCast<int32_t>(kZapValue)));
+  }
+}
+
+
+void MacroAssembler::RecordWrite(Register object,
+                                 Register address,
+                                 Register value) {
+  // The compiled code assumes that record write doesn't change the
+  // context register, so we check that none of the clobbered
+  // registers are esi.
+  ASSERT(!object.is(esi) && !value.is(esi) && !address.is(esi));
+
+  // First, check if a write barrier is even needed. The tests below
+  // catch stores of Smis and stores into young gen.
+  Label done;
+
+  // Skip barrier if writing a smi.
+  ASSERT_EQ(0, kSmiTag);
+  test(value, Immediate(kSmiTagMask));
+  j(zero, &done);
+
+  InNewSpace(object, value, equal, &done);
+
+  RecordWriteHelper(object, address, value);
+
+  bind(&done);
+
+  // Clobber all input registers when running with the debug-code flag
+  // turned on to provoke errors.
+  if (FLAG_debug_code) {
+    mov(object, Immediate(BitCast<int32_t>(kZapValue)));
+    mov(address, Immediate(BitCast<int32_t>(kZapValue)));
+    mov(value, Immediate(BitCast<int32_t>(kZapValue)));
   }
 }
 
@@ -293,6 +323,25 @@ Condition MacroAssembler::IsObjectStringType(Register heap_object,
   ASSERT(kNotStringTag != 0);
   test(instance_type, Immediate(kIsNotStringMask));
   return zero;
+}
+
+
+void MacroAssembler::IsObjectJSObjectType(Register heap_object,
+                                          Register map,
+                                          Register scratch,
+                                          Label* fail) {
+  mov(map, FieldOperand(heap_object, HeapObject::kMapOffset));
+  IsInstanceJSObjectType(map, scratch, fail);
+}
+
+
+void MacroAssembler::IsInstanceJSObjectType(Register map,
+                                            Register scratch,
+                                            Label* fail) {
+  movzx_b(scratch, FieldOperand(map, Map::kInstanceTypeOffset));
+  sub(Operand(scratch), Immediate(FIRST_JS_OBJECT_TYPE));
+  cmp(scratch, LAST_JS_OBJECT_TYPE - FIRST_JS_OBJECT_TYPE);
+  j(above, fail);
 }
 
 
@@ -495,97 +544,6 @@ void MacroAssembler::PopTryHandler() {
 }
 
 
-Register MacroAssembler::CheckMaps(JSObject* object, Register object_reg,
-                                   JSObject* holder, Register holder_reg,
-                                   Register scratch,
-                                   int save_at_depth,
-                                   Label* miss) {
-  // Make sure there's no overlap between scratch and the other
-  // registers.
-  ASSERT(!scratch.is(object_reg) && !scratch.is(holder_reg));
-
-  // Keep track of the current object in register reg.
-  Register reg = object_reg;
-  int depth = 0;
-
-  if (save_at_depth == depth) {
-    mov(Operand(esp, kPointerSize), object_reg);
-  }
-
-  // Check the maps in the prototype chain.
-  // Traverse the prototype chain from the object and do map checks.
-  while (object != holder) {
-    depth++;
-
-    // Only global objects and objects that do not require access
-    // checks are allowed in stubs.
-    ASSERT(object->IsJSGlobalProxy() || !object->IsAccessCheckNeeded());
-
-    JSObject* prototype = JSObject::cast(object->GetPrototype());
-    if (Heap::InNewSpace(prototype)) {
-      // Get the map of the current object.
-      mov(scratch, FieldOperand(reg, HeapObject::kMapOffset));
-      cmp(Operand(scratch), Immediate(Handle<Map>(object->map())));
-      // Branch on the result of the map check.
-      j(not_equal, miss, not_taken);
-      // Check access rights to the global object.  This has to happen
-      // after the map check so that we know that the object is
-      // actually a global object.
-      if (object->IsJSGlobalProxy()) {
-        CheckAccessGlobalProxy(reg, scratch, miss);
-
-        // Restore scratch register to be the map of the object.
-        // We load the prototype from the map in the scratch register.
-        mov(scratch, FieldOperand(reg, HeapObject::kMapOffset));
-      }
-      // The prototype is in new space; we cannot store a reference
-      // to it in the code. Load it from the map.
-      reg = holder_reg;  // from now the object is in holder_reg
-      mov(reg, FieldOperand(scratch, Map::kPrototypeOffset));
-    } else {
-      // Check the map of the current object.
-      cmp(FieldOperand(reg, HeapObject::kMapOffset),
-          Immediate(Handle<Map>(object->map())));
-      // Branch on the result of the map check.
-      j(not_equal, miss, not_taken);
-      // Check access rights to the global object.  This has to happen
-      // after the map check so that we know that the object is
-      // actually a global object.
-      if (object->IsJSGlobalProxy()) {
-        CheckAccessGlobalProxy(reg, scratch, miss);
-      }
-      // The prototype is in old space; load it directly.
-      reg = holder_reg;  // from now the object is in holder_reg
-      mov(reg, Handle<JSObject>(prototype));
-    }
-
-    if (save_at_depth == depth) {
-      mov(Operand(esp, kPointerSize), reg);
-    }
-
-    // Go to the next object in the prototype chain.
-    object = prototype;
-  }
-
-  // Check the holder map.
-  cmp(FieldOperand(reg, HeapObject::kMapOffset),
-      Immediate(Handle<Map>(holder->map())));
-  j(not_equal, miss, not_taken);
-
-  // Log the check depth.
-  LOG(IntEvent("check-maps-depth", depth + 1));
-
-  // Perform security check for access to the global object and return
-  // the holder register.
-  ASSERT(object == holder);
-  ASSERT(object->IsJSGlobalProxy() || !object->IsAccessCheckNeeded());
-  if (object->IsJSGlobalProxy()) {
-    CheckAccessGlobalProxy(reg, scratch, miss);
-  }
-  return reg;
-}
-
-
 void MacroAssembler::CheckAccessGlobalProxy(Register holder_reg,
                                             Register scratch,
                                             Label* miss) {
@@ -714,20 +672,33 @@ void MacroAssembler::AllocateInNewSpace(int object_size,
   // Load address of new object into result.
   LoadAllocationTopHelper(result, result_end, scratch, flags);
 
+  Register top_reg = result_end.is_valid() ? result_end : result;
+
   // Calculate new top and bail out if new space is exhausted.
   ExternalReference new_space_allocation_limit =
       ExternalReference::new_space_allocation_limit_address();
-  lea(result_end, Operand(result, object_size));
-  cmp(result_end, Operand::StaticVariable(new_space_allocation_limit));
+
+  if (top_reg.is(result)) {
+    add(Operand(top_reg), Immediate(object_size));
+  } else {
+    lea(top_reg, Operand(result, object_size));
+  }
+  cmp(top_reg, Operand::StaticVariable(new_space_allocation_limit));
   j(above, gc_required, not_taken);
 
-  // Tag result if requested.
-  if ((flags & TAG_OBJECT) != 0) {
-    lea(result, Operand(result, kHeapObjectTag));
-  }
-
   // Update allocation top.
-  UpdateAllocationTopHelper(result_end, scratch);
+  UpdateAllocationTopHelper(top_reg, scratch);
+
+  // Tag result if requested.
+  if (top_reg.is(result)) {
+    if ((flags & TAG_OBJECT) != 0) {
+      sub(Operand(result), Immediate(object_size - kHeapObjectTag));
+    } else {
+      sub(Operand(result), Immediate(object_size));
+    }
+  } else if ((flags & TAG_OBJECT) != 0) {
+    add(Operand(result), Immediate(kHeapObjectTag));
+  }
 }
 
 
@@ -1094,16 +1065,6 @@ void MacroAssembler::CallRuntime(Runtime::Function* f, int num_arguments) {
 }
 
 
-void MacroAssembler::CallExternalReference(ExternalReference ref,
-                                           int num_arguments) {
-  mov(eax, Immediate(num_arguments));
-  mov(ebx, Immediate(ref));
-
-  CEntryStub stub(1);
-  CallStub(&stub);
-}
-
-
 Object* MacroAssembler::TryCallRuntime(Runtime::Function* f,
                                        int num_arguments) {
   if (f->nargs >= 0 && f->nargs != num_arguments) {
@@ -1121,6 +1082,16 @@ Object* MacroAssembler::TryCallRuntime(Runtime::Function* f,
   mov(ebx, Immediate(ExternalReference(f)));
   CEntryStub ces(1);
   return TryCallStub(&ces);
+}
+
+
+void MacroAssembler::CallExternalReference(ExternalReference ref,
+                                           int num_arguments) {
+  mov(eax, Immediate(num_arguments));
+  mov(ebx, Immediate(ref));
+
+  CEntryStub stub(1);
+  CallStub(&stub);
 }
 
 
@@ -1148,8 +1119,7 @@ void MacroAssembler::PushHandleScope(Register scratch) {
   ExternalReference extensions_address =
       ExternalReference::handle_scope_extensions_address();
   mov(scratch, Operand::StaticVariable(extensions_address));
-  ASSERT_EQ(0, kSmiTag);
-  shl(scratch, kSmiTagSize);
+  SmiTag(scratch);
   push(scratch);
   mov(Operand::StaticVariable(extensions_address), Immediate(0));
   // Push next and limit pointers which will be wordsize aligned and
@@ -1173,16 +1143,14 @@ Object* MacroAssembler::PopHandleScopeHelper(Register saved,
   mov(scratch, Operand::StaticVariable(extensions_address));
   cmp(Operand(scratch), Immediate(0));
   j(equal, &write_back);
-  // Calling a runtime function messes with registers so we save and
-  // restore any one we're asked not to change
-  if (saved.is_valid()) push(saved);
+  push(saved);
   if (gc_allowed) {
     CallRuntime(Runtime::kDeleteHandleScopeExtensions, 0);
   } else {
     result = TryCallRuntime(Runtime::kDeleteHandleScopeExtensions, 0);
     if (result->IsFailure()) return result;
   }
-  if (saved.is_valid()) pop(saved);
+  pop(saved);
 
   bind(&write_back);
   ExternalReference limit_address =
@@ -1192,7 +1160,7 @@ Object* MacroAssembler::PopHandleScopeHelper(Register saved,
         ExternalReference::handle_scope_next_address();
   pop(Operand::StaticVariable(next_address));
   pop(scratch);
-  shr(scratch, kSmiTagSize);
+  SmiUntag(scratch);
   mov(Operand::StaticVariable(extensions_address), scratch);
 
   return result;

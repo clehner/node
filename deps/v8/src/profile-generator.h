@@ -31,6 +31,7 @@
 #ifdef ENABLE_LOGGING_AND_PROFILING
 
 #include "hashmap.h"
+#include "../include/v8-profiler.h"
 
 namespace v8 {
 namespace internal {
@@ -41,6 +42,9 @@ class TokenEnumerator {
   ~TokenEnumerator();
   int GetTokenId(Object* token);
 
+  static const int kNoSecurityToken = -1;
+  static const int kInheritsSecurityToken = -2;
+
  private:
   static void TokenRemovedCallback(v8::Persistent<v8::Value> handle,
                                    void* parameter);
@@ -50,6 +54,30 @@ class TokenEnumerator {
   List<bool> token_removed_;
 
   friend class TokenEnumeratorTester;
+
+  DISALLOW_COPY_AND_ASSIGN(TokenEnumerator);
+};
+
+
+// Provides a storage of strings allocated in C++ heap, to hold them
+// forever, even if they disappear from JS heap or external storage.
+class StringsStorage {
+ public:
+  StringsStorage();
+  ~StringsStorage();
+
+  const char* GetName(String* name);
+
+ private:
+  INLINE(static bool StringsMatch(void* key1, void* key2)) {
+    return strcmp(reinterpret_cast<char*>(key1),
+                  reinterpret_cast<char*>(key2)) == 0;
+  }
+
+  // Mapping of strings by String::Hash to const char* strings.
+  HashMap names_;
+
+  DISALLOW_COPY_AND_ASSIGN(StringsStorage);
 };
 
 
@@ -78,8 +106,6 @@ class CodeEntry {
   void CopyData(const CodeEntry& source);
 
   static const char* kEmptyNamePrefix;
-  static const int kNoSecurityToken = -1;
-  static const int kInheritsSecurityToken = -2;
 
  private:
   unsigned call_uid_;
@@ -130,7 +156,7 @@ class ProfileNode {
   CodeEntry* entry_;
   unsigned total_ticks_;
   unsigned self_ticks_;
-  // CodeEntry* -> ProfileNode*
+  // Mapping from CodeEntry* to ProfileNode*
   HashMap children_;
   List<ProfileNode*> children_list_;
 
@@ -257,6 +283,9 @@ class CpuProfilesCollection {
                             String* title,
                             double actual_sampling_rate);
   List<CpuProfile*>* Profiles(int security_token_id);
+  const char* GetName(String* name) {
+    return function_and_resource_names_.GetName(name);
+  }
   CpuProfile* GetProfile(int security_token_id, unsigned uid);
   inline bool is_last_profile();
 
@@ -274,27 +303,21 @@ class CpuProfilesCollection {
  private:
   INLINE(const char* GetFunctionName(String* name));
   INLINE(const char* GetFunctionName(const char* name));
-  const char* GetName(String* name);
   const char* GetName(int args_count);
   List<CpuProfile*>* GetProfilesList(int security_token_id);
   int TokenToIndex(int security_token_id);
-
-  INLINE(static bool StringsMatch(void* key1, void* key2)) {
-    return strcmp(reinterpret_cast<char*>(key1),
-                  reinterpret_cast<char*>(key2)) == 0;
-  }
 
   INLINE(static bool UidsMatch(void* key1, void* key2)) {
     return key1 == key2;
   }
 
-  // String::Hash -> const char*
-  HashMap function_and_resource_names_;
-  // args_count -> char*
+  StringsStorage function_and_resource_names_;
+  // Mapping from args_count (int) to char* strings.
   List<char*> args_count_names_;
   List<CodeEntry*> code_entries_;
   List<List<CpuProfile*>* > profiles_by_token_;
-  // uid -> index
+  // Mapping from profiles' uids to indexes in the second nested list
+  // of profiles_by_token_.
   HashMap profiles_uids_;
 
   // Accessed by VM thread and profile generator thread.
@@ -338,6 +361,8 @@ class SampleRateCalculator {
   unsigned measurements_count_;
   unsigned wall_time_query_countdown_;
   double last_wall_time_;
+
+  DISALLOW_COPY_AND_ASSIGN(SampleRateCalculator);
 };
 
 
@@ -395,6 +420,430 @@ class ProfileGenerator {
   SampleRateCalculator sample_rate_calc_;
 
   DISALLOW_COPY_AND_ASSIGN(ProfileGenerator);
+};
+
+
+class HeapSnapshot;
+class HeapEntry;
+
+
+class HeapGraphEdge {
+ public:
+  enum Type {
+    CONTEXT_VARIABLE = v8::HeapGraphEdge::CONTEXT_VARIABLE,
+    ELEMENT = v8::HeapGraphEdge::ELEMENT,
+    PROPERTY = v8::HeapGraphEdge::PROPERTY,
+    INTERNAL = v8::HeapGraphEdge::INTERNAL
+  };
+
+  HeapGraphEdge(Type type, const char* name, HeapEntry* from, HeapEntry* to);
+  HeapGraphEdge(int index, HeapEntry* from, HeapEntry* to);
+
+  Type type() const { return type_; }
+  int index() const {
+    ASSERT(type_ == ELEMENT);
+    return index_;
+  }
+  const char* name() const {
+    ASSERT(type_ == CONTEXT_VARIABLE || type_ == PROPERTY || type_ == INTERNAL);
+    return name_;
+  }
+  HeapEntry* from() const { return from_; }
+  HeapEntry* to() const { return to_; }
+
+ private:
+  Type type_;
+  union {
+    int index_;
+    const char* name_;
+  };
+  HeapEntry* from_;
+  HeapEntry* to_;
+
+  DISALLOW_COPY_AND_ASSIGN(HeapGraphEdge);
+};
+
+
+class HeapGraphPath;
+class CachedHeapGraphPath;
+
+class HeapEntry {
+ public:
+  enum Type {
+    INTERNAL = v8::HeapGraphNode::INTERNAL,
+    ARRAY = v8::HeapGraphNode::ARRAY,
+    STRING = v8::HeapGraphNode::STRING,
+    OBJECT = v8::HeapGraphNode::OBJECT,
+    CODE = v8::HeapGraphNode::CODE,
+    CLOSURE = v8::HeapGraphNode::CLOSURE
+  };
+
+  explicit HeapEntry(HeapSnapshot* snapshot)
+      : snapshot_(snapshot),
+        visited_(false),
+        type_(INTERNAL),
+        name_(""),
+        id_(0),
+        next_auto_index_(0),
+        self_size_(0),
+        security_token_id_(TokenEnumerator::kNoSecurityToken),
+        children_(1),
+        retainers_(0),
+        retaining_paths_(0),
+        total_size_(kUnknownSize),
+        non_shared_total_size_(kUnknownSize),
+        painted_(kUnpainted) { }
+  HeapEntry(HeapSnapshot* snapshot,
+            Type type,
+            const char* name,
+            uint64_t id,
+            int self_size,
+            int security_token_id)
+      : snapshot_(snapshot),
+        visited_(false),
+        type_(type),
+        name_(name),
+        id_(id),
+        next_auto_index_(1),
+        self_size_(self_size),
+        security_token_id_(security_token_id),
+        children_(4),
+        retainers_(4),
+        retaining_paths_(4),
+        total_size_(kUnknownSize),
+        non_shared_total_size_(kUnknownSize),
+        painted_(kUnpainted) { }
+  ~HeapEntry();
+
+  bool visited() const { return visited_; }
+  Type type() const { return type_; }
+  const char* name() const { return name_; }
+  uint64_t id() const { return id_; }
+  int self_size() const { return self_size_; }
+  int security_token_id() const { return security_token_id_; }
+  bool painted_reachable() { return painted_ == kPaintReachable; }
+  bool not_painted_reachable_from_others() {
+    return painted_ != kPaintReachableFromOthers;
+  }
+  const List<HeapGraphEdge*>* children() const { return &children_; }
+  const List<HeapGraphEdge*>* retainers() const { return &retainers_; }
+  const List<HeapGraphPath*>* GetRetainingPaths();
+
+  template<class Visitor>
+  void ApplyAndPaintAllReachable(Visitor* visitor);
+
+  void ClearPaint() { painted_ = kUnpainted; }
+  void CutEdges();
+  void MarkAsVisited() { visited_ = true; }
+  void PaintAllReachable();
+  void PaintReachable() {
+    ASSERT(painted_ == kUnpainted);
+    painted_ = kPaintReachable;
+  }
+  void PaintReachableFromOthers() { painted_ = kPaintReachableFromOthers; }
+  void SetClosureReference(const char* name, HeapEntry* entry);
+  void SetElementReference(int index, HeapEntry* entry);
+  void SetInternalReference(const char* name, HeapEntry* entry);
+  void SetPropertyReference(const char* name, HeapEntry* entry);
+  void SetAutoIndexReference(HeapEntry* entry);
+  void SetUnidirAutoIndexReference(HeapEntry* entry);
+
+  int TotalSize();
+  int NonSharedTotalSize();
+
+  void Print(int max_depth, int indent);
+
+ private:
+  void AddEdge(HeapGraphEdge* edge);
+  int CalculateTotalSize();
+  int CalculateNonSharedTotalSize();
+  void FindRetainingPaths(HeapEntry* node, CachedHeapGraphPath* prev_path);
+  void RemoveChild(HeapGraphEdge* edge);
+  void RemoveRetainer(HeapGraphEdge* edge);
+
+  const char* TypeAsString();
+
+  HeapSnapshot* snapshot_;
+  bool visited_;
+  Type type_;
+  const char* name_;
+  uint64_t id_;
+  int next_auto_index_;
+  int self_size_;
+  int security_token_id_;
+  List<HeapGraphEdge*> children_;
+  List<HeapGraphEdge*> retainers_;
+  List<HeapGraphPath*> retaining_paths_;
+  int total_size_;
+  int non_shared_total_size_;
+  int painted_;
+
+  static const int kUnknownSize = -1;
+  static const int kUnpainted = 0;
+  static const int kPaintReachable = 1;
+  static const int kPaintReachableFromOthers = 2;
+
+  DISALLOW_IMPLICIT_CONSTRUCTORS(HeapEntry);
+};
+
+
+class HeapGraphPath {
+ public:
+  HeapGraphPath()
+      : path_(8) { }
+  explicit HeapGraphPath(const List<HeapGraphEdge*>& path);
+
+  void Add(HeapGraphEdge* edge) { path_.Add(edge); }
+  void Set(int index, HeapGraphEdge* edge) { path_[index] = edge; }
+  const List<HeapGraphEdge*>* path() const { return &path_; }
+
+  void Print();
+
+ private:
+  List<HeapGraphEdge*> path_;
+
+  DISALLOW_COPY_AND_ASSIGN(HeapGraphPath);
+};
+
+
+class HeapEntriesMap {
+ public:
+  HeapEntriesMap();
+  ~HeapEntriesMap();
+
+  void Alias(HeapObject* object, HeapEntry* entry);
+  void Apply(void (HeapEntry::*Func)(void));
+  template<class Visitor>
+  void Apply(Visitor* visitor);
+  HeapEntry* Map(HeapObject* object);
+  void Pair(HeapObject* object, HeapEntry* entry);
+
+  uint32_t capacity() { return entries_.capacity(); }
+
+ private:
+  INLINE(uint32_t Hash(HeapObject* object)) {
+    return static_cast<uint32_t>(reinterpret_cast<intptr_t>(object));
+  }
+  INLINE(static bool HeapObjectsMatch(void* key1, void* key2)) {
+    return key1 == key2;
+  }
+  INLINE(bool IsAlias(void* ptr)) {
+    return reinterpret_cast<intptr_t>(ptr) & kAliasTag;
+  }
+
+  static const intptr_t kAliasTag = 1;
+
+  HashMap entries_;
+
+  DISALLOW_COPY_AND_ASSIGN(HeapEntriesMap);
+};
+
+
+class HeapSnapshotsCollection;
+class HeapSnapshotsDiff;
+
+// HeapSnapshot represents a single heap snapshot. It is stored in
+// HeapSnapshotsCollection, which is also a factory for
+// HeapSnapshots. All HeapSnapshots share strings copied from JS heap
+// to be able to return them even if they were collected.
+// HeapSnapshotGenerator fills in a HeapSnapshot.
+class HeapSnapshot {
+ public:
+  HeapSnapshot(HeapSnapshotsCollection* collection,
+               const char* title,
+               unsigned uid);
+  ~HeapSnapshot();
+  void ClearPaint();
+  void CutObjectsFromForeignSecurityContexts();
+  HeapEntry* GetEntry(Object* object);
+  void SetClosureReference(
+      HeapEntry* parent, String* reference_name, Object* child);
+  void SetElementReference(HeapEntry* parent, int index, Object* child);
+  void SetInternalReference(
+      HeapEntry* parent, const char* reference_name, Object* child);
+  void SetPropertyReference(
+      HeapEntry* parent, String* reference_name, Object* child);
+
+  INLINE(const char* title() const) { return title_; }
+  INLINE(unsigned uid() const) { return uid_; }
+  const HeapEntry* const_root() const { return &root_; }
+  HeapEntry* root() { return &root_; }
+  template<class Visitor>
+  void IterateEntries(Visitor* visitor) { entries_.Apply(visitor); }
+  List<HeapEntry*>* GetSortedEntriesList();
+  HeapSnapshotsDiff* CompareWith(HeapSnapshot* snapshot);
+
+  void Print(int max_depth);
+
+ private:
+  HeapEntry* AddEntry(HeapObject* object, HeapEntry::Type type) {
+    return AddEntry(object, type, "");
+  }
+  HeapEntry* AddEntry(
+      HeapObject* object, HeapEntry::Type type, const char* name);
+  void AddEntryAlias(HeapObject* object, HeapEntry* entry) {
+    entries_.Alias(object, entry);
+  }
+  HeapEntry* FindEntry(HeapObject* object) {
+    return entries_.Map(object);
+  }
+  int GetGlobalSecurityToken();
+  int GetObjectSecurityToken(HeapObject* obj);
+  static int GetObjectSize(HeapObject* obj);
+  static int CalculateNetworkSize(JSObject* obj);
+
+  HeapSnapshotsCollection* collection_;
+  const char* title_;
+  unsigned uid_;
+  HeapEntry root_;
+  // Mapping from HeapObject* pointers to HeapEntry* pointers.
+  HeapEntriesMap entries_;
+  // Entries sorted by id.
+  List<HeapEntry*>* sorted_entries_;
+
+  DISALLOW_COPY_AND_ASSIGN(HeapSnapshot);
+};
+
+
+class HeapObjectsMap {
+ public:
+  HeapObjectsMap();
+  ~HeapObjectsMap();
+
+  void SnapshotGenerationFinished();
+  uint64_t FindObject(Address addr);
+  void MoveObject(Address from, Address to);
+
+ private:
+  struct EntryInfo {
+    explicit EntryInfo(uint64_t id) : id(id), accessed(true) { }
+    EntryInfo(uint64_t id, bool accessed) : id(id), accessed(accessed) { }
+    uint64_t id;
+    bool accessed;
+  };
+
+  void AddEntry(Address addr, uint64_t id);
+  uint64_t FindEntry(Address addr);
+  void RemoveDeadEntries();
+
+  static bool AddressesMatch(void* key1, void* key2) {
+    return key1 == key2;
+  }
+
+  static uint32_t AddressHash(Address addr) {
+    return static_cast<int32_t>(reinterpret_cast<intptr_t>(addr));
+  }
+
+  bool initial_fill_mode_;
+  uint64_t next_id_;
+  HashMap entries_map_;
+  List<EntryInfo>* entries_;
+
+  DISALLOW_COPY_AND_ASSIGN(HeapObjectsMap);
+};
+
+
+class HeapSnapshotsDiff {
+ public:
+  HeapSnapshotsDiff(HeapSnapshot* snapshot1, HeapSnapshot* snapshot2)
+      : snapshot1_(snapshot1),
+        snapshot2_(snapshot2),
+        additions_root_(new HeapEntry(snapshot2)),
+        deletions_root_(new HeapEntry(snapshot1)) { }
+
+  ~HeapSnapshotsDiff() {
+    delete deletions_root_;
+    delete additions_root_;
+  }
+
+  void AddAddedEntry(HeapEntry* entry) {
+    additions_root_->SetUnidirAutoIndexReference(entry);
+  }
+
+  void AddDeletedEntry(HeapEntry* entry) {
+    deletions_root_->SetUnidirAutoIndexReference(entry);
+  }
+
+  const HeapEntry* additions_root() const { return additions_root_; }
+  const HeapEntry* deletions_root() const { return deletions_root_; }
+
+ private:
+  HeapSnapshot* snapshot1_;
+  HeapSnapshot* snapshot2_;
+  HeapEntry* additions_root_;
+  HeapEntry* deletions_root_;
+
+  DISALLOW_COPY_AND_ASSIGN(HeapSnapshotsDiff);
+};
+
+
+class HeapSnapshotsComparator {
+ public:
+  HeapSnapshotsComparator() { }
+  ~HeapSnapshotsComparator();
+  HeapSnapshotsDiff* Compare(HeapSnapshot* snapshot1, HeapSnapshot* snapshot2);
+ private:
+  List<HeapSnapshotsDiff*> diffs_;
+
+  DISALLOW_COPY_AND_ASSIGN(HeapSnapshotsComparator);
+};
+
+
+class HeapSnapshotsCollection {
+ public:
+  HeapSnapshotsCollection();
+  ~HeapSnapshotsCollection();
+
+  bool is_tracking_objects() { return is_tracking_objects_; }
+
+  HeapSnapshot* NewSnapshot(const char* name, unsigned uid);
+  void SnapshotGenerationFinished() { ids_.SnapshotGenerationFinished(); }
+  List<HeapSnapshot*>* snapshots() { return &snapshots_; }
+  HeapSnapshot* GetSnapshot(unsigned uid);
+
+  const char* GetName(String* name) { return names_.GetName(name); }
+
+  TokenEnumerator* token_enumerator() { return token_enumerator_; }
+
+  uint64_t GetObjectId(Address addr) { return ids_.FindObject(addr); }
+  void ObjectMoveEvent(Address from, Address to) { ids_.MoveObject(from, to); }
+
+  HeapSnapshotsDiff* CompareSnapshots(HeapSnapshot* snapshot1,
+                                      HeapSnapshot* snapshot2);
+
+ private:
+  INLINE(static bool HeapSnapshotsMatch(void* key1, void* key2)) {
+    return key1 == key2;
+  }
+
+  bool is_tracking_objects_;  // Whether tracking object moves is needed.
+  List<HeapSnapshot*> snapshots_;
+  // Mapping from snapshots' uids to HeapSnapshot* pointers.
+  HashMap snapshots_uids_;
+  StringsStorage names_;
+  TokenEnumerator* token_enumerator_;
+  // Mapping from HeapObject addresses to objects' uids.
+  HeapObjectsMap ids_;
+  HeapSnapshotsComparator comparator_;
+
+  DISALLOW_COPY_AND_ASSIGN(HeapSnapshotsCollection);
+};
+
+
+class HeapSnapshotGenerator {
+ public:
+  explicit HeapSnapshotGenerator(HeapSnapshot* snapshot);
+  void GenerateSnapshot();
+
+ private:
+  void ExtractReferences(HeapObject* obj);
+  void ExtractClosureReferences(JSObject* js_obj, HeapEntry* entry);
+  void ExtractPropertyReferences(JSObject* js_obj, HeapEntry* entry);
+  void ExtractElementReferences(JSObject* js_obj, HeapEntry* entry);
+
+  HeapSnapshot* snapshot_;
+
+  DISALLOW_COPY_AND_ASSIGN(HeapSnapshotGenerator);
 };
 
 } }  // namespace v8::internal

@@ -73,15 +73,26 @@ class MacroAssembler: public Assembler {
                   Condition cc,  // equal for new space, not_equal otherwise.
                   Label* branch);
 
-  // For page containing |object| mark region covering [object+offset] dirty.
-  // object is the object being stored into, value is the object being stored.
-  // If offset is zero, then the scratch register contains the array index into
-  // the elements array represented as a Smi.
-  // All registers are clobbered by the operation.
+  // For page containing |object| mark region covering [object+offset]
+  // dirty. |object| is the object being stored into, |value| is the
+  // object being stored. If offset is zero, then the scratch register
+  // contains the array index into the elements array represented as a
+  // Smi. All registers are clobbered by the operation. RecordWrite
+  // filters out smis so it does not update the write barrier if the
+  // value is a smi.
   void RecordWrite(Register object,
                    int offset,
                    Register value,
                    Register scratch);
+
+  // For page containing |object| mark region covering |address|
+  // dirty. |object| is the object being stored into, |value| is the
+  // object being stored. All registers are clobbered by the
+  // operation. RecordWrite filters out smis so it does not update the
+  // write barrier if the value is a smi.
+  void RecordWrite(Register object,
+                   Register address,
+                   Register value);
 
 #ifdef ENABLE_DEBUGGER_SUPPORT
   // ---------------------------------------------------------------------------
@@ -188,6 +199,18 @@ class MacroAssembler: public Assembler {
                                Register map,
                                Register instance_type);
 
+  // Check if a heap object's type is in the JSObject range, not including
+  // JSFunction.  The object's map will be loaded in the map register.
+  // Any or all of the three registers may be the same.
+  // The contents of the scratch register will always be overwritten.
+  void IsObjectJSObjectType(Register heap_object,
+                            Register map,
+                            Register scratch,
+                            Label* fail);
+
+  // The contents of the scratch register will be overwritten.
+  void IsInstanceJSObjectType(Register map, Register scratch, Label* fail);
+
   // FCmp is similar to integer cmp, but requires unsigned
   // jcc instructions (je, ja, jae, jb, jbe, je, and jz).
   void FCmp();
@@ -220,24 +243,6 @@ class MacroAssembler: public Assembler {
 
   // ---------------------------------------------------------------------------
   // Inline caching support
-
-  // Generates code that verifies that the maps of objects in the
-  // prototype chain of object hasn't changed since the code was
-  // generated and branches to the miss label if any map has. If
-  // necessary the function also generates code for security check
-  // in case of global object holders. The scratch and holder
-  // registers are always clobbered, but the object register is only
-  // clobbered if it the same as the holder register. The function
-  // returns a register containing the holder - either object_reg or
-  // holder_reg.
-  // The function can optionally (when save_at_depth !=
-  // kInvalidProtoDepth) save the object at the given depth by moving
-  // it to [esp + kPointerSize].
-  Register CheckMaps(JSObject* object, Register object_reg,
-                     JSObject* holder, Register holder_reg,
-                     Register scratch,
-                     int save_at_depth,
-                     Label* miss);
 
   // Generate code for checking access rights - used for security checks
   // on access to global objects across environments. The holder register
@@ -388,11 +393,11 @@ class MacroAssembler: public Assembler {
   // Convenience function: Same as above, but takes the fid instead.
   void CallRuntime(Runtime::FunctionId id, int num_arguments);
 
-  // Convenience function: call an external reference.
-  void CallExternalReference(ExternalReference ref, int num_arguments);
-
   // Convenience function: Same as above, but takes the fid instead.
   Object* TryCallRuntime(Runtime::FunctionId id, int num_arguments);
+
+  // Convenience function: call an external reference.
+  void CallExternalReference(ExternalReference ref, int num_arguments);
 
   // Tail call of a runtime routine (jump).
   // Like JumpToExternalReference, but also takes care of passing the number
@@ -426,7 +431,7 @@ class MacroAssembler: public Assembler {
   void PushHandleScope(Register scratch);
 
   // Pops a handle scope using the specified scratch register and
-  // ensuring that saved register, it is not no_reg, is left unchanged.
+  // ensuring that saved register is left unchanged.
   void PopHandleScope(Register saved, Register scratch);
 
   // As PopHandleScope, but does not perform a GC.  Instead, returns a

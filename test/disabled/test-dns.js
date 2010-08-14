@@ -1,4 +1,5 @@
-require("../common");
+common = require("../common");
+assert = common.assert
 
 var dns = require("dns"),
     child_process = require("child_process"),
@@ -21,7 +22,7 @@ var hosts = ['example.com',
              'google.com', // MX, multiple A records
              '_xmpp-client._tcp.google.com', // SRV
              'oakalynhall.co.uk' // Multiple PTR replies
-            ]; 
+            ];
 
 var records = ['A', 'AAAA', 'MX', 'TXT', 'SRV'];
 
@@ -58,12 +59,12 @@ function checkDnsRecord(host, record) {
             while (ll--) {
               var ip = result[ll];
               var reverseCmd = "host " + ip +
-                               "| cut -d \" \" -f 5-" + 
+                               "| cut -d \" \" -f 5-" +
                                "| sed -e 's/\\.$//'";
 
               child_process.exec(reverseCmd, checkReverse(ip));
             }
-          }); 
+          });
         break;
       case "MX":
         dns.resolve(myHost, myRecord, function (error, result, ttl, cname) {
@@ -126,7 +127,7 @@ function cmpResults(expected, result, ttl, cname) {
     if (expected.length == 1 && expected[0] == '3(NXDOMAIN)' && result.length == 0) {
       // it's ok, dig returns NXDOMAIN, while dns module returns nothing
     } else {
-      puts('---WARNING---\nexpected ' + expected + '\nresult ' + result + '\n-------------');
+      console.log('---WARNING---\nexpected ' + expected + '\nresult ' + result + '\n-------------');
     }
     return;
   }
@@ -136,6 +137,6 @@ function cmpResults(expected, result, ttl, cname) {
   ll = expected.length;
   while (ll--) {
     assert.equal(result[ll], expected[ll]);
-    puts("Result " + result[ll] + " was equal to expected " + expected[ll]);
+    console.log("Result " + result[ll] + " was equal to expected " + expected[ll]);
   }
 }

@@ -195,6 +195,7 @@ BUILTIN(ArrayCodeGeneric) {
   }
 
   // 'array' now contains the JSArray we should initialize.
+  ASSERT(array->HasFastElements());
 
   // Optimize the case where there is one argument and the argument is a
   // small smi.
@@ -1262,6 +1263,11 @@ static void Generate_StoreIC_Miss(MacroAssembler* masm) {
 }
 
 
+static void Generate_StoreIC_Normal(MacroAssembler* masm) {
+  StoreIC::GenerateNormal(masm);
+}
+
+
 static void Generate_StoreIC_Megamorphic(MacroAssembler* masm) {
   StoreIC::GenerateMegamorphic(masm);
 }
@@ -1360,9 +1366,16 @@ static void Generate_StubNoRegisters_DebugBreak(MacroAssembler* masm) {
   Debug::GenerateStubNoRegistersDebugBreak(masm);
 }
 
+
+static void Generate_Slot_DebugBreak(MacroAssembler* masm) {
+  Debug::GenerateSlotDebugBreak(masm);
+}
+
+
 static void Generate_PlainReturn_LiveEdit(MacroAssembler* masm) {
   Debug::GeneratePlainReturnLiveEdit(masm);
 }
+
 
 static void Generate_FrameDropper_LiveEdit(MacroAssembler* masm) {
   Debug::GenerateFrameDropperLiveEdit(masm);
@@ -1462,7 +1475,7 @@ void Builtins::Setup(bool create_heap_objects) {
         // During startup it's OK to always allocate and defer GC to later.
         // This simplifies things because we don't need to retry.
         AlwaysAllocateScope __scope__;
-        code = Heap::CreateCode(desc, NULL, flags, masm.CodeObject());
+        code = Heap::CreateCode(desc, flags, masm.CodeObject());
         if (code->IsFailure()) {
           v8::internal::V8::FatalProcessOutOfMemory("CreateCode");
         }

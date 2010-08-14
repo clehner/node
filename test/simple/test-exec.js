@@ -1,4 +1,5 @@
-require("../common");
+common = require("../common");
+assert = common.assert
 var exec = require('child_process').exec;
 success_count = 0;
 error_count = 0;
@@ -6,9 +7,9 @@ error_count = 0;
 exec("ls /", function (err, stdout, stderr) {
   if (err) {
     error_count++;
-    puts("error!: " + err.code);
-    puts("stdout: " + JSON.stringify(stdout));
-    puts("stderr: " + JSON.stringify(stderr));
+    console.log("error!: " + err.code);
+    console.log("stdout: " + JSON.stringify(stdout));
+    console.log("stderr: " + JSON.stringify(stderr));
     assert.equal(false, err.killed);
   } else {
     success_count++;
@@ -24,9 +25,9 @@ exec("ls /DOES_NOT_EXIST", function (err, stdout, stderr) {
     assert.equal(true, err.code != 0);
     assert.equal(false, err.killed);
     assert.strictEqual(null, err.signal);
-    puts("error code: " + err.code);
-    puts("stdout: " + JSON.stringify(stdout));
-    puts("stderr: " + JSON.stringify(stderr));
+    console.log("error code: " + err.code);
+    console.log("stdout: " + JSON.stringify(stdout));
+    console.log("stderr: " + JSON.stringify(stderr));
   } else {
     success_count++;
     p(stdout);

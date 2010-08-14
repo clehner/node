@@ -1,4 +1,5 @@
-require("../common");
+common = require("../common");
+assert = common.assert
 http = require("http");
 url = require("url");
 
@@ -12,32 +13,34 @@ var server = http.createServer(function (req, res) {
                       });
   res.end(body);
 });
-server.listen(PORT);
-
-var client = http.createClient(PORT);
+server.listen(common.PORT);
 
 var body1 = "";
 var body2 = "";
 
-var req1 = client.request("/1")
-req1.addListener('response', function (res1) {
-  res1.setBodyEncoding("utf8");
+server.addListener("listening", function() {
+  var client = http.createClient(common.PORT);
 
-  res1.addListener('data', function (chunk) {
-    body1 += chunk;
-  });
+  var req1 = client.request("/1")
+  req1.end();
+  req1.addListener('response', function (res1) {
+    res1.setEncoding("utf8");
 
-  res1.addListener('end', function () {
-    var req2 = client.request("/2");
-    req2.addListener('response', function (res2) {
-      res2.setBodyEncoding("utf8");
-      res2.addListener('data', function (chunk) { body2 += chunk; });
-      res2.addListener('end', function () { server.close(); });
+    res1.addListener('data', function (chunk) {
+      body1 += chunk;
     });
-    req2.end();
+
+    res1.addListener('end', function () {
+      var req2 = client.request("/2");
+      req2.end();
+      req2.addListener('response', function (res2) {
+        res2.setEncoding("utf8");
+        res2.addListener('data', function (chunk) { body2 += chunk; });
+        res2.addListener('end', function () { server.close(); });
+      });
+    });
   });
 });
-req1.end();
 
 process.addListener("exit", function () {
   assert.equal(body1_s, body1);

@@ -1,14 +1,15 @@
-require("../common");
+common = require("../common");
+assert = common.assert
 
 var spawn = require('child_process').spawn;
-child = spawn('/usr/bin/env', [], {'HELLO' : 'WORLD'});
+child = spawn('/usr/bin/env', [], {env: {'HELLO' : 'WORLD'}});
 
 response = "";
 
 child.stdout.setEncoding('utf8');
 
 child.stdout.addListener("data", function (chunk) {
-  puts("stdout: " + chunk);
+  console.log("stdout: " + chunk);
   response += chunk;
 });
 

@@ -1,34 +1,36 @@
-require("../common");
+common = require("../common");
+assert = common.assert
 
-var tcp = require("tcp"),
+var net = require("net"),
     sys = require("sys"),
     http = require("http");
 
 var errorCount = 0;
 var eofCount = 0;
 
-var server = tcp.createServer(function(socket) {
+var server = net.createServer(function(socket) {
   socket.end();
 });
-server.listen(PORT);
+server.on('listening', function(){
+  var client = http.createClient(common.PORT);
 
-var client = http.createClient(PORT);
+  client.addListener("error", function(err) {
+    console.log("ERROR! "+(err.stack||err));
+    errorCount++;
+  });
 
-client.addListener("error", function() {
-  sys.puts("ERROR!");
-  errorCount++;
+  client.addListener("end", function() {
+    console.log("EOF!");
+    eofCount++;
+  });
+
+  var request = client.request("GET", "/", {"host": "localhost"});
+  request.end();
+  request.addListener('response', function(response) {
+    console.log("STATUS: " + response.statusCode);
+  });
 });
-
-client.addListener("end", function() {
-  sys.puts("EOF!");
-  eofCount++;
-});
-
-var request = client.request("GET", "/", {"host": "localhost"});
-request.addListener('response', function(response) {
-  sys.puts("STATUS: " + response.statusCode);
-});
-request.end();
+server.listen(common.PORT);
 
 setTimeout(function () {
   server.close();

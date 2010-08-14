@@ -1,4 +1,5 @@
-require("../common");
+common = require("../common");
+assert = common.assert
 
 net = require("net");
 
@@ -10,7 +11,7 @@ function pingPongTest (port, host) {
   var sent_final_ping = false;
 
   var server = net.createServer(function (socket) {
-    puts("connection: " + socket.remoteAddress);
+    console.log("connection: " + socket.remoteAddress);
     assert.equal(server, socket.server);
 
     socket.setNoDelay();
@@ -18,7 +19,7 @@ function pingPongTest (port, host) {
 
     socket.setEncoding('utf8');
     socket.addListener("data", function (data) {
-      puts("server got: " + data);
+      console.log("server got: " + data);
       assert.equal(true, socket.writable);
       assert.equal(true, socket.readable);
       assert.equal(true, count <= N);
@@ -38,15 +39,16 @@ function pingPongTest (port, host) {
     });
 
     socket.addListener("close", function () {
-      puts('server socket.endd');
+      console.log('server socket.endd');
       assert.equal(false, socket.writable);
       assert.equal(false, socket.readable);
       socket.server.close();
     });
   });
 
-  server.addListener("listening", function () {
-    puts("server listening on " + port + " " + host);
+
+  server.listen(port, host, function () {
+    console.log("server listening on " + port + " " + host);
 
     var client = net.createConnection(port, host);
 
@@ -58,7 +60,7 @@ function pingPongTest (port, host) {
     });
 
     client.addListener("data", function (data) {
-      puts("client got: " + data);
+      console.log("client got: " + data);
 
       assert.equal("PONG", data);
       count += 1;
@@ -82,7 +84,7 @@ function pingPongTest (port, host) {
     });
 
     client.addListener("close", function () {
-      puts('client.endd');
+      console.log('client.endd');
       assert.equal(N+1, count);
       assert.equal(true, sent_final_ping);
       tests_run += 1;
@@ -92,8 +94,6 @@ function pingPongTest (port, host) {
       throw e;
     });
   });
-
-  server.listen(port, host);
 }
 
 /* All are run at once, so run on different ports */
@@ -104,5 +104,5 @@ pingPongTest("/tmp/pingpong.sock");
 
 process.addListener("exit", function () {
   assert.equal(4, tests_run);
-  puts('done');
+  console.log('done');
 });

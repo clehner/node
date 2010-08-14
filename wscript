@@ -7,7 +7,6 @@ from os.path import join, dirname, abspath
 from logging import fatal
 
 cwd = os.getcwd()
-VERSION="0.1.97"
 APPNAME="node.js"
 
 import js2c
@@ -16,10 +15,15 @@ srcdir = '.'
 blddir = 'build'
 
 
-
 jobs=1
 if os.environ.has_key('JOBS'):
   jobs = int(os.environ['JOBS'])
+else:
+  try:
+    import multiprocessing
+    jobs = multiprocessing.cpu_count()
+  except:
+    pass
 
 def set_options(opt):
   # the gcc module provides a --debug-level option
@@ -137,7 +141,7 @@ def configure(conf):
   conf.env["USE_SHARED_LIBEV"] = o.shared_libev or o.shared_libev_includes or o.shared_libev_libpath
 
   conf.check(lib='dl', uselib_store='DL')
-  if not sys.platform.startswith("sunos"):
+  if not sys.platform.startswith("sunos") and not sys.platform.startswith("cygwin"):
     conf.env.append_value("CCFLAGS", "-rdynamic")
     conf.env.append_value("LINKFLAGS_DL", "-rdynamic")
 
@@ -160,7 +164,7 @@ def configure(conf):
     if conf.check_cfg(package='openssl',
                       args='--cflags --libs',
                       uselib_store='OPENSSL'):
-      conf.env["USE_OPENSSL"] = True
+      Options.options.use_openssl = conf.env["USE_OPENSSL"] = True
       conf.env.append_value("CXXFLAGS", "-DHAVE_OPENSSL=1")
     else:
       libssl = conf.check_cc(lib='ssl',
@@ -172,7 +176,7 @@ def configure(conf):
                                 header_name='openssl/crypto.h',
                                 uselib_store='OPENSSL')
       if libcrypto and libssl:
-        conf.env["USE_OPENSSL"] = True
+        conf.env["USE_OPENSSL"] = Options.options.use_openssl = True
         conf.env.append_value("CXXFLAGS", "-DHAVE_OPENSSL=1")
 
   conf.check(lib='rt', uselib_store='RT')
@@ -183,11 +187,7 @@ def configure(conf):
     if not conf.check(lib='nsl', uselib_store="NSL"):
       conf.fatal("Cannot find nsl library")
 
-
-
   conf.sub_config('deps/libeio')
-
-
 
   if conf.env['USE_SHARED_V8']:
     v8_includes = [];
@@ -247,11 +247,14 @@ def configure(conf):
     conf.env.append_value ('CCFLAGS', '-threads')
     conf.env.append_value ('CXXFLAGS', '-threads')
     #conf.env.append_value ('LINKFLAGS', ' -threads')
-  else:
+  elif not sys.platform.startswith("cygwin"):
     threadflags='-pthread'
     conf.env.append_value ('CCFLAGS', threadflags)
     conf.env.append_value ('CXXFLAGS', threadflags)
     conf.env.append_value ('LINKFLAGS', threadflags)
+  if sys.platform.startswith("darwin"):
+    # used by platform_darwin_*.cc
+    conf.env.append_value('LINKFLAGS', ['-framework','Carbon'])
 
   conf.env.append_value("CCFLAGS", "-DX_STACKSIZE=%d" % (1024*64))
 
@@ -278,7 +281,7 @@ def configure(conf):
     conf.env.append_value('CXXFLAGS', '-DHAVE_FDATASYNC=0')
 
   # platform
-  platform_def = '-DPLATFORM=' + sys.platform
+  platform_def = '-DPLATFORM=' + conf.env['DEST_OS']
   conf.env.append_value('CCFLAGS', platform_def)
   conf.env.append_value('CXXFLAGS', platform_def)
 
@@ -358,6 +361,7 @@ def build_v8(bld):
     bld.env_of_name('debug').append_value("LINKFLAGS_V8_G", t)
 
   bld.install_files('${PREFIX}/include/node/', 'deps/v8/include/*.h')
+
 
 def build(bld):
   ## This snippet is to show full commands as WAF executes
@@ -454,6 +458,7 @@ def build(bld):
   node.source = """
     src/node.cc
     src/node_buffer.cc
+    src/node_extensions.cc
     src/node_http_parser.cc
     src/node_net.cc
     src/node_io_watcher.cc
@@ -468,7 +473,15 @@ def build(bld):
     src/node_timer.cc
     src/node_script.cc
   """
-  if bld.env["USE_OPENSSL"]: node.source += "src/node_crypto.cc"
+
+  platform_file = "src/platform_%s.cc" % bld.env['DEST_OS']
+  if os.path.exists(join(cwd, platform_file)):
+    node.source += platform_file
+  else:
+    node.source += "src/platform_none.cc "
+
+
+  if bld.env["USE_OPENSSL"]: node.source += " src/node_crypto.cc "
 
   node.includes = """
     src/
@@ -486,36 +499,36 @@ def build(bld):
     node.add_objects += ' cares '
     node.includes += '  deps/c-ares deps/c-ares/' + bld.env['DEST_OS'] + '-' + bld.env['DEST_CPU']
 
-  def subflags(program):
-    if os.path.exists(join(cwd, ".git")):
-      actual_version=cmd_output("git describe").strip()
-    else:
-      actual_version=VERSION
+  if sys.platform.startswith('cygwin'):
+    bld.env.append_value('LINKFLAGS', '-Wl,--export-all-symbols')
+    bld.env.append_value('LINKFLAGS', '-Wl,--out-implib,default/libnode.dll.a')
+    bld.env.append_value('LINKFLAGS', '-Wl,--output-def,default/libnode.def')
+    bld.install_files('${PREFIX}/lib', "build/default/libnode.*")
 
+  def subflags(program):
     x = { 'CCFLAGS'   : " ".join(program.env["CCFLAGS"])
         , 'CPPFLAGS'  : " ".join(program.env["CPPFLAGS"])
         , 'LIBFLAGS'  : " ".join(program.env["LIBFLAGS"])
-        , 'VERSION'   : actual_version
         , 'PREFIX'    : program.env["PREFIX"]
         }
     return x
 
   # process file.pc.in -> file.pc
 
-  node_version = bld.new_task_gen('subst', before="cxx")
-  node_version.source = 'src/node_version.h.in'
-  node_version.target = 'src/node_version.h'
-  node_version.dict = subflags(node)
-  node_version.install_path = '${PREFIX}/include/node'
+  node_conf = bld.new_task_gen('subst', before="cxx")
+  node_conf.source = 'src/node_config.h.in'
+  node_conf.target = 'src/node_config.h'
+  node_conf.dict = subflags(node)
+  node_conf.install_path = '${PREFIX}/include/node'
 
   if bld.env["USE_DEBUG"]:
     node_g = node.clone("debug")
     node_g.target = "node_g"
     node_g.uselib += ' V8_G'
 
-    node_version_g = node_version.clone("debug")
-    node_version_g.dict = subflags(node_g)
-    node_version_g.install_path = None
+    node_conf_g = node_conf.clone("debug")
+    node_conf_g.dict = subflags(node_g)
+    node_conf_g.install_path = None
 
   # After creating the debug clone, append the V8 dep
   node.uselib += ' V8'
@@ -526,6 +539,7 @@ def build(bld):
     src/node_object_wrap.h
     src/node_buffer.h
     src/node_events.h
+    src/node_version.h
   """)
 
   # Only install the man page if it exists.
@@ -541,7 +555,11 @@ def shutdown():
   Options.options.debug
   # HACK to get binding.node out of build directory.
   # better way to do this?
-  if not Options.commands['clean']:
+  if Options.commands['configure']:
+    if not Options.options.use_openssl:
+      print "WARNING WARNING WARNING"
+      print "OpenSSL not found. Will compile Node without crypto support!"
+  elif not Options.commands['clean']:
     if os.path.exists('build/default/node') and not os.path.exists('node'):
       os.symlink('build/default/node', 'node')
     if os.path.exists('build/debug/node_g') and not os.path.exists('node_g'):

@@ -794,7 +794,7 @@ class FrameUncookingThreadVisitor : public ThreadVisitor {
 
 static void IterateAllThreads(ThreadVisitor* visitor) {
   Top::IterateThread(visitor);
-  ThreadManager::IterateThreads(visitor);
+  ThreadManager::IterateArchivedThreads(visitor);
 }
 
 // Finds all references to original and replaces them with substitution.
@@ -1187,7 +1187,13 @@ static bool FixTryCatchHandler(StackFrame* top_frame,
 // Returns error message or NULL.
 static const char* DropFrames(Vector<StackFrame*> frames,
                               int top_frame_index,
-                              int bottom_js_frame_index) {
+                              int bottom_js_frame_index,
+                              Debug::FrameDropMode* mode,
+                              Object*** restarter_frame_function_pointer) {
+  if (Debug::kFrameDropperFrameSize < 0) {
+    return "Stack manipulations are not supported in this architecture.";
+  }
+
   StackFrame* pre_top_frame = frames[top_frame_index - 1];
   StackFrame* top_frame = frames[top_frame_index];
   StackFrame* bottom_js_frame = frames[bottom_js_frame_index];
@@ -1198,12 +1204,18 @@ static const char* DropFrames(Vector<StackFrame*> frames,
   if (pre_top_frame->code()->is_inline_cache_stub() &&
       pre_top_frame->code()->ic_state() == DEBUG_BREAK) {
     // OK, we can drop inline cache calls.
+    *mode = Debug::FRAME_DROPPED_IN_IC_CALL;
+  } else if (pre_top_frame->code() == Debug::debug_break_slot()) {
+    // OK, we can drop debug break slot.
+    *mode = Debug::FRAME_DROPPED_IN_DEBUG_SLOT_CALL;
   } else if (pre_top_frame->code() ==
       Builtins::builtin(Builtins::FrameDropper_LiveEdit)) {
     // OK, we can drop our own code.
+    *mode = Debug::FRAME_DROPPED_IN_DIRECT_CALL;
   } else if (pre_top_frame->code()->kind() == Code::STUB &&
       pre_top_frame->code()->major_key()) {
-    // Unit Test entry, it's fine, we support this case.
+    // Entry from our unit tests, it's fine, we support this case.
+    *mode = Debug::FRAME_DROPPED_IN_DIRECT_CALL;
   } else {
     return "Unknown structure of stack above changing function";
   }
@@ -1227,7 +1239,10 @@ static const char* DropFrames(Vector<StackFrame*> frames,
   top_frame->set_pc(code->entry());
   pre_top_frame->SetCallerFp(bottom_js_frame->fp());
 
-  Debug::SetUpFrameDropperFrame(bottom_js_frame, code);
+  *restarter_frame_function_pointer =
+      Debug::SetUpFrameDropperFrame(bottom_js_frame, code);
+
+  ASSERT((**restarter_frame_function_pointer)->IsJSFunction());
 
   for (Address a = unused_stack_top;
       a < unused_stack_bottom;
@@ -1316,8 +1331,11 @@ static const char* DropActivationsInActiveThread(
     return NULL;
   }
 
+  Debug::FrameDropMode drop_mode = Debug::FRAMES_UNTOUCHED;
+  Object** restarter_frame_function_pointer = NULL;
   const char* error_message = DropFrames(frames, top_frame_index,
-                                         bottom_js_frame_index);
+                                         bottom_js_frame_index, &drop_mode,
+                                         &restarter_frame_function_pointer);
 
   if (error_message != NULL) {
     return error_message;
@@ -1331,7 +1349,8 @@ static const char* DropActivationsInActiveThread(
       break;
     }
   }
-  Debug::FramesHaveBeenDropped(new_id);
+  Debug::FramesHaveBeenDropped(new_id, drop_mode,
+                               restarter_frame_function_pointer);
 
   // Replace "blocked on active" with "replaced on active" status.
   for (int i = 0; i < array_len; i++) {
@@ -1386,7 +1405,7 @@ Handle<JSArray> LiveEdit::CheckAndDropActivations(
   // First check inactive threads. Fail if some functions are blocked there.
   InactiveThreadActivationsChecker inactive_threads_checker(shared_info_array,
                                                             result);
-  ThreadManager::IterateThreads(&inactive_threads_checker);
+  ThreadManager::IterateArchivedThreads(&inactive_threads_checker);
   if (inactive_threads_checker.HasBlockedFunctions()) {
     return result;
   }

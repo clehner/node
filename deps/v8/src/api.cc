@@ -34,6 +34,7 @@
 #include "debug.h"
 #include "execution.h"
 #include "global-handles.h"
+#include "heap-profiler.h"
 #include "messages.h"
 #include "platform.h"
 #include "profile-generator-inl.h"
@@ -105,9 +106,6 @@ static i::HandleScopeImplementer thread_local;
 
 
 static FatalErrorCallback exception_behavior = NULL;
-int i::Internals::kJSObjectType = JS_OBJECT_TYPE;
-int i::Internals::kFirstNonstringType = FIRST_NONSTRING_TYPE;
-int i::Internals::kProxyType = PROXY_TYPE;
 
 static void DefaultFatalErrorHandler(const char* location,
                                      const char* message) {
@@ -128,7 +126,7 @@ static FatalErrorCallback& GetFatalErrorHandler() {
 
 // When V8 cannot allocated memory FatalProcessOutOfMemory is called.
 // The default fatal error handler is called and execution is stopped.
-void i::V8::FatalProcessOutOfMemory(const char* location) {
+void i::V8::FatalProcessOutOfMemory(const char* location, bool take_snapshot) {
   i::HeapStats heap_stats;
   int start_marker;
   heap_stats.start_marker = &start_marker;
@@ -168,9 +166,17 @@ void i::V8::FatalProcessOutOfMemory(const char* location) {
   heap_stats.near_death_global_handle_count = &near_death_global_handle_count;
   int destroyed_global_handle_count;
   heap_stats.destroyed_global_handle_count = &destroyed_global_handle_count;
+  int memory_allocator_size;
+  heap_stats.memory_allocator_size = &memory_allocator_size;
+  int memory_allocator_capacity;
+  heap_stats.memory_allocator_capacity = &memory_allocator_capacity;
+  int objects_per_type[LAST_TYPE + 1] = {0};
+  heap_stats.objects_per_type = objects_per_type;
+  int size_per_type[LAST_TYPE + 1] = {0};
+  heap_stats.size_per_type = size_per_type;
   int end_marker;
   heap_stats.end_marker = &end_marker;
-  i::Heap::RecordStats(&heap_stats);
+  i::Heap::RecordStats(&heap_stats, take_snapshot);
   i::V8::SetFatalError();
   FatalErrorCallback callback = GetFatalErrorHandler();
   {
@@ -1119,6 +1125,12 @@ ScriptData* ScriptData::PreCompile(const char* input, int length) {
 }
 
 
+ScriptData* ScriptData::PreCompile(v8::Handle<String> source) {
+  i::Handle<i::String> str = Utils::OpenHandle(*source);
+  return i::PreParse(str, NULL, NULL);
+}
+
+
 ScriptData* ScriptData::New(const char* data, int length) {
   // Return an empty ScriptData if the length is obviously invalid.
   if (length % sizeof(unsigned) != 0) {
@@ -1434,6 +1446,22 @@ v8::Handle<Value> Message::GetScriptData() const {
 }
 
 
+v8::Handle<v8::StackTrace> Message::GetStackTrace() const {
+  if (IsDeadCheck("v8::Message::GetStackTrace()")) {
+    return Local<v8::StackTrace>();
+  }
+  ENTER_V8;
+  HandleScope scope;
+  i::Handle<i::JSObject> obj =
+      i::Handle<i::JSObject>::cast(Utils::OpenHandle(this));
+  i::Handle<i::Object> stackFramesObj = GetProperty(obj, "stackFrames");
+  if (!stackFramesObj->IsJSArray()) return v8::Handle<v8::StackTrace>();
+  i::Handle<i::JSArray> stackTrace =
+      i::Handle<i::JSArray>::cast(stackFramesObj);
+  return scope.Close(Utils::StackTraceToLocal(stackTrace));
+}
+
+
 static i::Handle<i::Object> CallV8HeapFunction(const char* name,
                                                i::Handle<i::Object> recv,
                                                int argc,
@@ -1579,7 +1607,9 @@ Local<StackTrace> StackTrace::CurrentStackTrace(int frame_limit,
     StackTraceOptions options) {
   if (IsDeadCheck("v8::StackTrace::CurrentStackTrace()")) Local<StackTrace>();
   ENTER_V8;
-  return i::Top::CaptureCurrentStackTrace(frame_limit, options);
+  i::Handle<i::JSArray> stackTrace =
+      i::Top::CaptureCurrentStackTrace(frame_limit, options);
+  return Utils::StackTraceToLocal(stackTrace);
 }
 
 
@@ -2602,7 +2632,38 @@ void v8::Object::SetIndexedPropertiesToPixelData(uint8_t* data, int length) {
     return;
   }
   i::Handle<i::PixelArray> pixels = i::Factory::NewPixelArray(length, data);
+  self->set_map(
+      *i::Factory::GetSlowElementsMap(i::Handle<i::Map>(self->map())));
   self->set_elements(*pixels);
+}
+
+
+bool v8::Object::HasIndexedPropertiesInPixelData() {
+  ON_BAILOUT("v8::HasIndexedPropertiesInPixelData()", return false);
+  i::Handle<i::JSObject> self = Utils::OpenHandle(this);
+  return self->HasPixelElements();
+}
+
+
+uint8_t* v8::Object::GetIndexedPropertiesPixelData() {
+  ON_BAILOUT("v8::GetIndexedPropertiesPixelData()", return NULL);
+  i::Handle<i::JSObject> self = Utils::OpenHandle(this);
+  if (self->HasPixelElements()) {
+    return i::PixelArray::cast(self->elements())->external_pointer();
+  } else {
+    return NULL;
+  }
+}
+
+
+int v8::Object::GetIndexedPropertiesPixelDataLength() {
+  ON_BAILOUT("v8::GetIndexedPropertiesPixelDataLength()", return -1);
+  i::Handle<i::JSObject> self = Utils::OpenHandle(this);
+  if (self->HasPixelElements()) {
+    return i::PixelArray::cast(self->elements())->length();
+  } else {
+    return -1;
+  }
 }
 
 
@@ -2626,7 +2687,63 @@ void v8::Object::SetIndexedPropertiesToExternalArrayData(
   }
   i::Handle<i::ExternalArray> array =
       i::Factory::NewExternalArray(length, array_type, data);
+  self->set_map(
+      *i::Factory::GetSlowElementsMap(i::Handle<i::Map>(self->map())));
   self->set_elements(*array);
+}
+
+
+bool v8::Object::HasIndexedPropertiesInExternalArrayData() {
+  ON_BAILOUT("v8::HasIndexedPropertiesInExternalArrayData()", return false);
+  i::Handle<i::JSObject> self = Utils::OpenHandle(this);
+  return self->HasExternalArrayElements();
+}
+
+
+void* v8::Object::GetIndexedPropertiesExternalArrayData() {
+  ON_BAILOUT("v8::GetIndexedPropertiesExternalArrayData()", return NULL);
+  i::Handle<i::JSObject> self = Utils::OpenHandle(this);
+  if (self->HasExternalArrayElements()) {
+    return i::ExternalArray::cast(self->elements())->external_pointer();
+  } else {
+    return NULL;
+  }
+}
+
+
+ExternalArrayType v8::Object::GetIndexedPropertiesExternalArrayDataType() {
+  ON_BAILOUT("v8::GetIndexedPropertiesExternalArrayDataType()",
+             return static_cast<ExternalArrayType>(-1));
+  i::Handle<i::JSObject> self = Utils::OpenHandle(this);
+  switch (self->elements()->map()->instance_type()) {
+    case i::EXTERNAL_BYTE_ARRAY_TYPE:
+      return kExternalByteArray;
+    case i::EXTERNAL_UNSIGNED_BYTE_ARRAY_TYPE:
+      return kExternalUnsignedByteArray;
+    case i::EXTERNAL_SHORT_ARRAY_TYPE:
+      return kExternalShortArray;
+    case i::EXTERNAL_UNSIGNED_SHORT_ARRAY_TYPE:
+      return kExternalUnsignedShortArray;
+    case i::EXTERNAL_INT_ARRAY_TYPE:
+      return kExternalIntArray;
+    case i::EXTERNAL_UNSIGNED_INT_ARRAY_TYPE:
+      return kExternalUnsignedIntArray;
+    case i::EXTERNAL_FLOAT_ARRAY_TYPE:
+      return kExternalFloatArray;
+    default:
+      return static_cast<ExternalArrayType>(-1);
+  }
+}
+
+
+int v8::Object::GetIndexedPropertiesExternalArrayDataLength() {
+  ON_BAILOUT("v8::GetIndexedPropertiesExternalArrayDataLength()", return 0);
+  i::Handle<i::JSObject> self = Utils::OpenHandle(this);
+  if (self->HasExternalArrayElements()) {
+    return i::ExternalArray::cast(self->elements())->length();
+  } else {
+    return -1;
+  }
 }
 
 
@@ -3691,6 +3808,17 @@ void V8::RemoveMessageListeners(MessageCallback that) {
 }
 
 
+void V8::SetCaptureStackTraceForUncaughtExceptions(
+      bool capture,
+      int frame_limit,
+      StackTrace::StackTraceOptions options) {
+  i::Top::SetCaptureStackTraceForUncaughtExceptions(
+      capture,
+      frame_limit,
+      options);
+}
+
+
 void V8::SetCounterFunction(CounterLookupCallback callback) {
   if (IsDeadCheck("v8::V8::SetCounterFunction()")) return;
   i::StatsTable::SetCounterFunction(callback);
@@ -4093,6 +4221,12 @@ void Debug::DebugBreak() {
 }
 
 
+void Debug::DebugBreakForCommand(ClientData* data) {
+  if (!i::V8::IsRunning()) return;
+  i::Debugger::EnqueueDebugCommand(data);
+}
+
+
 static v8::Debug::MessageHandler message_handler = NULL;
 
 static void MessageHandlerWrapper(const v8::Debug::Message& message) {
@@ -4354,6 +4488,231 @@ const CpuProfile* CpuProfiler::StopProfiling(Handle<String> title,
       i::CpuProfiler::StopProfiling(
           security_token.IsEmpty() ? NULL : *Utils::OpenHandle(*security_token),
           *Utils::OpenHandle(*title)));
+}
+
+
+HeapGraphEdge::Type HeapGraphEdge::GetType() const {
+  IsDeadCheck("v8::HeapGraphEdge::GetType");
+  return static_cast<HeapGraphEdge::Type>(
+      reinterpret_cast<const i::HeapGraphEdge*>(this)->type());
+}
+
+
+Handle<Value> HeapGraphEdge::GetName() const {
+  IsDeadCheck("v8::HeapGraphEdge::GetName");
+  const i::HeapGraphEdge* edge =
+      reinterpret_cast<const i::HeapGraphEdge*>(this);
+  switch (edge->type()) {
+    case i::HeapGraphEdge::CONTEXT_VARIABLE:
+    case i::HeapGraphEdge::INTERNAL:
+    case i::HeapGraphEdge::PROPERTY:
+      return Handle<String>(ToApi<String>(i::Factory::LookupAsciiSymbol(
+          edge->name())));
+    case i::HeapGraphEdge::ELEMENT:
+      return Handle<Number>(ToApi<Number>(i::Factory::NewNumberFromInt(
+          edge->index())));
+    default: UNREACHABLE();
+  }
+  return ImplementationUtilities::Undefined();
+}
+
+
+const HeapGraphNode* HeapGraphEdge::GetFromNode() const {
+  IsDeadCheck("v8::HeapGraphEdge::GetFromNode");
+  const i::HeapEntry* from =
+      reinterpret_cast<const i::HeapGraphEdge*>(this)->from();
+  return reinterpret_cast<const HeapGraphNode*>(from);
+}
+
+
+const HeapGraphNode* HeapGraphEdge::GetToNode() const {
+  IsDeadCheck("v8::HeapGraphEdge::GetToNode");
+  const i::HeapEntry* to =
+      reinterpret_cast<const i::HeapGraphEdge*>(this)->to();
+  return reinterpret_cast<const HeapGraphNode*>(to);
+}
+
+
+int HeapGraphPath::GetEdgesCount() const {
+  return reinterpret_cast<const i::HeapGraphPath*>(this)->path()->length();
+}
+
+
+const HeapGraphEdge* HeapGraphPath::GetEdge(int index) const {
+  return reinterpret_cast<const HeapGraphEdge*>(
+      reinterpret_cast<const i::HeapGraphPath*>(this)->path()->at(index));
+}
+
+
+const HeapGraphNode* HeapGraphPath::GetFromNode() const {
+  return GetEdgesCount() > 0 ? GetEdge(0)->GetFromNode() : NULL;
+}
+
+
+const HeapGraphNode* HeapGraphPath::GetToNode() const {
+  const int count = GetEdgesCount();
+  return count > 0 ? GetEdge(count - 1)->GetToNode() : NULL;
+}
+
+
+HeapGraphNode::Type HeapGraphNode::GetType() const {
+  IsDeadCheck("v8::HeapGraphNode::GetType");
+  return static_cast<HeapGraphNode::Type>(
+      reinterpret_cast<const i::HeapEntry*>(this)->type());
+}
+
+
+Handle<String> HeapGraphNode::GetName() const {
+  IsDeadCheck("v8::HeapGraphNode::GetName");
+  return Handle<String>(ToApi<String>(i::Factory::LookupAsciiSymbol(
+      reinterpret_cast<const i::HeapEntry*>(this)->name())));
+}
+
+
+uint64_t HeapGraphNode::GetId() const {
+  IsDeadCheck("v8::HeapGraphNode::GetId");
+  return reinterpret_cast<const i::HeapEntry*>(this)->id();
+}
+
+
+int HeapGraphNode::GetSelfSize() const {
+  IsDeadCheck("v8::HeapGraphNode::GetSelfSize");
+  return reinterpret_cast<const i::HeapEntry*>(this)->self_size();
+}
+
+
+int HeapGraphNode::GetTotalSize() const {
+  IsDeadCheck("v8::HeapSnapshot::GetHead");
+  return const_cast<i::HeapEntry*>(
+      reinterpret_cast<const i::HeapEntry*>(this))->TotalSize();
+}
+
+
+int HeapGraphNode::GetPrivateSize() const {
+  IsDeadCheck("v8::HeapSnapshot::GetPrivateSize");
+  return const_cast<i::HeapEntry*>(
+      reinterpret_cast<const i::HeapEntry*>(this))->NonSharedTotalSize();
+}
+
+
+int HeapGraphNode::GetChildrenCount() const {
+  IsDeadCheck("v8::HeapSnapshot::GetChildrenCount");
+  return reinterpret_cast<const i::HeapEntry*>(this)->children()->length();
+}
+
+
+const HeapGraphEdge* HeapGraphNode::GetChild(int index) const {
+  IsDeadCheck("v8::HeapSnapshot::GetChild");
+  return reinterpret_cast<const HeapGraphEdge*>(
+      reinterpret_cast<const i::HeapEntry*>(this)->children()->at(index));
+}
+
+
+int HeapGraphNode::GetRetainersCount() const {
+  IsDeadCheck("v8::HeapSnapshot::GetRetainersCount");
+  return reinterpret_cast<const i::HeapEntry*>(this)->retainers()->length();
+}
+
+
+const HeapGraphEdge* HeapGraphNode::GetRetainer(int index) const {
+  IsDeadCheck("v8::HeapSnapshot::GetRetainer");
+  return reinterpret_cast<const HeapGraphEdge*>(
+      reinterpret_cast<const i::HeapEntry*>(this)->retainers()->at(index));
+}
+
+
+int HeapGraphNode::GetRetainingPathsCount() const {
+  IsDeadCheck("v8::HeapSnapshot::GetRetainingPathsCount");
+  return const_cast<i::HeapEntry*>(
+      reinterpret_cast<const i::HeapEntry*>(
+          this))->GetRetainingPaths()->length();
+}
+
+
+const HeapGraphPath* HeapGraphNode::GetRetainingPath(int index) const {
+  IsDeadCheck("v8::HeapSnapshot::GetRetainingPath");
+  return reinterpret_cast<const HeapGraphPath*>(
+      const_cast<i::HeapEntry*>(
+          reinterpret_cast<const i::HeapEntry*>(
+              this))->GetRetainingPaths()->at(index));
+}
+
+
+const HeapGraphNode* HeapSnapshotsDiff::GetAdditionsRoot() const {
+  IsDeadCheck("v8::HeapSnapshotsDiff::GetAdditionsRoot");
+  const i::HeapSnapshotsDiff* diff =
+      reinterpret_cast<const i::HeapSnapshotsDiff*>(this);
+  return reinterpret_cast<const HeapGraphNode*>(diff->additions_root());
+}
+
+
+const HeapGraphNode* HeapSnapshotsDiff::GetDeletionsRoot() const {
+  IsDeadCheck("v8::HeapSnapshotsDiff::GetDeletionsRoot");
+  const i::HeapSnapshotsDiff* diff =
+      reinterpret_cast<const i::HeapSnapshotsDiff*>(this);
+  return reinterpret_cast<const HeapGraphNode*>(diff->deletions_root());
+}
+
+
+unsigned HeapSnapshot::GetUid() const {
+  IsDeadCheck("v8::HeapSnapshot::GetUid");
+  return reinterpret_cast<const i::HeapSnapshot*>(this)->uid();
+}
+
+
+Handle<String> HeapSnapshot::GetTitle() const {
+  IsDeadCheck("v8::HeapSnapshot::GetTitle");
+  const i::HeapSnapshot* snapshot =
+      reinterpret_cast<const i::HeapSnapshot*>(this);
+  return Handle<String>(ToApi<String>(i::Factory::LookupAsciiSymbol(
+      snapshot->title())));
+}
+
+
+const HeapGraphNode* HeapSnapshot::GetRoot() const {
+  IsDeadCheck("v8::HeapSnapshot::GetHead");
+  const i::HeapSnapshot* snapshot =
+      reinterpret_cast<const i::HeapSnapshot*>(this);
+  return reinterpret_cast<const HeapGraphNode*>(snapshot->const_root());
+}
+
+
+const HeapSnapshotsDiff* HeapSnapshot::CompareWith(
+    const HeapSnapshot* snapshot) const {
+  IsDeadCheck("v8::HeapSnapshot::CompareWith");
+  i::HeapSnapshot* snapshot1 = const_cast<i::HeapSnapshot*>(
+      reinterpret_cast<const i::HeapSnapshot*>(this));
+  i::HeapSnapshot* snapshot2 = const_cast<i::HeapSnapshot*>(
+      reinterpret_cast<const i::HeapSnapshot*>(snapshot));
+  return reinterpret_cast<const HeapSnapshotsDiff*>(
+      snapshot1->CompareWith(snapshot2));
+}
+
+
+int HeapProfiler::GetSnapshotsCount() {
+  IsDeadCheck("v8::HeapProfiler::GetSnapshotsCount");
+  return i::HeapProfiler::GetSnapshotsCount();
+}
+
+
+const HeapSnapshot* HeapProfiler::GetSnapshot(int index) {
+  IsDeadCheck("v8::HeapProfiler::GetSnapshot");
+  return reinterpret_cast<const HeapSnapshot*>(
+      i::HeapProfiler::GetSnapshot(index));
+}
+
+
+const HeapSnapshot* HeapProfiler::FindSnapshot(unsigned uid) {
+  IsDeadCheck("v8::HeapProfiler::FindSnapshot");
+  return reinterpret_cast<const HeapSnapshot*>(
+      i::HeapProfiler::FindSnapshot(uid));
+}
+
+
+const HeapSnapshot* HeapProfiler::TakeSnapshot(Handle<String> title) {
+  IsDeadCheck("v8::HeapProfiler::TakeSnapshot");
+  return reinterpret_cast<const HeapSnapshot*>(
+      i::HeapProfiler::TakeSnapshot(*Utils::OpenHandle(*title)));
 }
 
 #endif  // ENABLE_LOGGING_AND_PROFILING

@@ -495,6 +495,49 @@ const struct message requests[] =
   ,.body= ""
   }
 
+#define CONNECT_REQUEST 17
+, {.name = "connect request"
+  ,.type= HTTP_REQUEST
+  ,.raw= "CONNECT home.netscape.com:443 HTTP/1.0\r\n"
+         "User-agent: Mozilla/1.1N\r\n"
+         "Proxy-authorization: basic aGVsbG86d29ybGQ=\r\n"
+         "\r\n"
+  ,.should_keep_alive= FALSE
+  ,.message_complete_on_eof= FALSE
+  ,.http_major= 1
+  ,.http_minor= 0
+  ,.method= HTTP_CONNECT
+  ,.query_string= ""
+  ,.fragment= ""
+  ,.request_path= ""
+  ,.request_url= "home.netscape.com:443"
+  ,.num_headers= 2
+  ,.upgrade=1
+  ,.headers= { { "User-agent", "Mozilla/1.1N" }
+             , { "Proxy-authorization", "basic aGVsbG86d29ybGQ=" }
+             }
+  ,.body= ""
+  }
+
+#define REPORT_REQ 18
+, {.name= "report request"
+  ,.type= HTTP_REQUEST
+  ,.raw= "REPORT /test HTTP/1.1\r\n"
+         "\r\n"
+  ,.should_keep_alive= TRUE
+  ,.message_complete_on_eof= FALSE
+  ,.http_major= 1
+  ,.http_minor= 1
+  ,.method= HTTP_REPORT
+  ,.query_string= ""
+  ,.fragment= ""
+  ,.request_path= "/test"
+  ,.request_url= "/test"
+  ,.num_headers= 0
+  ,.headers= {}
+  ,.body= ""
+  }
+
 , {.name= NULL } /* sentinel */
 };
 
@@ -721,6 +764,75 @@ const struct message responses[] =
   ,.body= ""
   }
 
+#define BONJOUR_MADAME_FR 8
+/* The client should not merge two headers fields when the first one doesn't
+ * have a value.
+ */
+, {.name= "bonjourmadame.fr"
+  ,.type= HTTP_RESPONSE
+  ,.raw= "HTTP/1.0 301 Moved Permanently\r\n"
+         "Date: Thu, 03 Jun 2010 09:56:32 GMT\r\n"
+         "Server: Apache/2.2.3 (Red Hat)\r\n"
+         "Cache-Control: public\r\n"
+         "Pragma: \r\n"
+         "Location: http://www.bonjourmadame.fr/\r\n"
+         "Vary: Accept-Encoding\r\n"
+         "Content-Length: 0\r\n"
+         "Content-Type: text/html; charset=UTF-8\r\n"
+         "Connection: keep-alive\r\n"
+         "\r\n"
+  ,.should_keep_alive= TRUE
+  ,.message_complete_on_eof= FALSE
+  ,.http_major= 1
+  ,.http_minor= 0
+  ,.status_code= 301
+  ,.num_headers= 9
+  ,.headers=
+    { { "Date", "Thu, 03 Jun 2010 09:56:32 GMT" }
+    , { "Server", "Apache/2.2.3 (Red Hat)" }
+    , { "Cache-Control", "public" }
+    , { "Pragma", "" }
+    , { "Location", "http://www.bonjourmadame.fr/" }
+    , { "Vary",  "Accept-Encoding" }
+    , { "Content-Length", "0" }
+    , { "Content-Type", "text/html; charset=UTF-8" }
+    , { "Connection", "keep-alive" }
+    }
+  ,.body= ""
+  }
+
+#define SPACE_IN_FIELD_RES 9
+/* Should handle spaces in header fields */
+, {.name= "field space"
+  ,.type= HTTP_RESPONSE
+  ,.raw= "HTTP/1.1 200 OK\r\n"
+         "Server: Microsoft-IIS/6.0\r\n"
+         "X-Powered-By: ASP.NET\r\n"
+         "en-US Content-Type: text/xml\r\n" /* this is the problem */
+         "Content-Type: text/xml\r\n"
+         "Content-Length: 16\r\n"
+         "Date: Fri, 23 Jul 2010 18:45:38 GMT\r\n"
+         "Connection: keep-alive\r\n"
+         "\r\n"
+         "<xml>hello</xml>" /* fake body */
+  ,.should_keep_alive= TRUE
+  ,.message_complete_on_eof= FALSE
+  ,.http_major= 1
+  ,.http_minor= 1
+  ,.status_code= 200
+  ,.num_headers= 7
+  ,.headers=
+    { { "Server",  "Microsoft-IIS/6.0" }
+    , { "X-Powered-By", "ASP.NET" }
+    , { "en-US Content-Type", "text/xml" }
+    , { "Content-Type", "text/xml" }
+    , { "Content-Length", "16" }
+    , { "Date", "Fri, 23 Jul 2010 18:45:38 GMT" }
+    , { "Connection", "keep-alive" }
+    }
+  ,.body= "<xml>hello</xml>"
+  }
+
 , {.name= NULL } /* sentinel */
 };
 
@@ -871,6 +983,19 @@ static http_parser_settings settings_count_body =
   ,.on_message_complete = message_complete_cb
   };
 
+static http_parser_settings settings_null =
+  {.on_message_begin = 0
+  ,.on_header_field = 0
+  ,.on_header_value = 0
+  ,.on_path = 0
+  ,.on_url = 0
+  ,.on_fragment = 0
+  ,.on_query_string = 0
+  ,.on_body = 0
+  ,.on_headers_complete = 0
+  ,.on_message_complete = 0
+  };
+
 void
 parser_init (enum http_parser_type type)
 {
@@ -894,7 +1019,7 @@ parser_free ()
   parser = NULL;
 }
 
-inline size_t parse (const char *buf, size_t len)
+size_t parse (const char *buf, size_t len)
 {
   size_t nparsed;
   currently_parsing_eof = (len == 0);
@@ -902,7 +1027,7 @@ inline size_t parse (const char *buf, size_t len)
   return nparsed;
 }
 
-inline size_t parse_count_body (const char *buf, size_t len)
+size_t parse_count_body (const char *buf, size_t len)
 {
   size_t nparsed;
   currently_parsing_eof = (len == 0);
@@ -1036,38 +1161,57 @@ print_error (const char *raw, size_t error_location)
 void
 test_message (const struct message *message)
 {
-  parser_init(message->type);
+  size_t raw_len = strlen(message->raw);
+  size_t msg1len;
+  for (msg1len = 0; msg1len < raw_len; msg1len++) {
+    parser_init(message->type);
 
-  size_t read;
+    size_t read;
+    const char *msg1 = message->raw;
+    const char *msg2 = msg1 + msg1len;
+    size_t msg2len = raw_len - msg1len;
 
-  read = parse(message->raw, strlen(message->raw));
+    if (msg1len) {
+      read = parse(msg1, msg1len);
 
-  if (message->upgrade && parser->upgrade) goto test;
+      if (message->upgrade && parser->upgrade) goto test;
 
-  if (read != strlen(message->raw)) {
-    print_error(message->raw, read);
-    exit(1);
+      if (read != msg1len) {
+        print_error(msg1, read);
+        exit(1);
+      }
+    }
+
+
+    read = parse(msg2, msg2len);
+
+    if (message->upgrade && parser->upgrade) goto test;
+
+    if (read != msg2len) {
+      print_error(msg2, read);
+      exit(1);
+    }
+
+    read = parse(NULL, 0);
+
+    if (message->upgrade && parser->upgrade) goto test;
+
+    if (read != 0) {
+      print_error(message->raw, read);
+      exit(1);
+    }
+
+  test:
+
+    if (num_messages != 1) {
+      printf("\n*** num_messages != 1 after testing '%s' ***\n\n", message->name);
+      exit(1);
+    }
+
+    if(!message_eq(0, message)) exit(1);
+
+    parser_free();
   }
-
-  read = parse(NULL, 0);
-
-  if (message->upgrade && parser->upgrade) goto test;
-
-  if (read != 0) {
-    print_error(message->raw, read);
-    exit(1);
-  }
-
-test:
-
-  if (num_messages != 1) {
-    printf("\n*** num_messages != 1 after testing '%s' ***\n\n", message->name);
-    exit(1);
-  }
-
-  if(!message_eq(0, message)) exit(1);
-
-  parser_free();
 }
 
 void
@@ -1107,23 +1251,80 @@ test_message_count_body (const struct message *message)
 }
 
 void
-test_error (const char *buf)
+test_simple (const char *buf, int should_pass)
 {
   parser_init(HTTP_REQUEST);
 
   size_t parsed;
-
+  int pass;
   parsed = parse(buf, strlen(buf));
-  if (parsed != strlen(buf)) goto out;
+  pass = (parsed == strlen(buf));
   parsed = parse(NULL, 0);
-  if (parsed != 0) goto out;
+  pass &= (parsed == 0);
 
-  fprintf(stderr, "\n*** Error expected but none found ***\n\n%s", buf);
+  parser_free();
+
+  if (pass != should_pass) {
+    fprintf(stderr, "\n*** test_simple expected %s ***\n\n%s", should_pass ? "success" : "error", buf);
+    exit(1);
+  }
+}
+
+void
+test_header_overflow_error (int req)
+{
+  http_parser parser;
+  http_parser_init(&parser, req ? HTTP_REQUEST : HTTP_RESPONSE);
+  size_t parsed;
+  const char *buf;
+  buf = req ? "GET / HTTP/1.1\r\n" : "HTTP/1.0 200 OK\r\n";
+  parsed = http_parser_execute(&parser, &settings_null, buf, strlen(buf));
+  assert(parsed == strlen(buf));
+
+  buf = "header-key: header-value\r\n";
+  int i;
+  for (i = 0; i < 10000; i++) {
+    if (http_parser_execute(&parser, &settings_null, buf, strlen(buf)) != strlen(buf)) {
+      //fprintf(stderr, "error found on iter %d\n", i);
+      return;
+    }
+  }
+
+  fprintf(stderr, "\n*** Error expected but none in header overflow test ***\n");
   exit(1);
+}
+
+void
+test_no_overflow_long_body (int req, size_t length)
+{
+  http_parser parser;
+  http_parser_init(&parser, req ? HTTP_REQUEST : HTTP_RESPONSE);
+  size_t parsed;
+  size_t i;
+  char buf1[3000];
+  size_t buf1len = sprintf(buf1, "%s\r\nConnection: Keep-Alive\r\nContent-Length: %zu\r\n\r\n",
+      req ? "POST / HTTP/1.0" : "HTTP/1.0 200 OK", length);
+  parsed = http_parser_execute(&parser, &settings_null, buf1, buf1len);
+  if (parsed != buf1len)
+    goto err;
+
+  for (i = 0; i < length; i++) {
+    char foo = 'a';
+    parsed = http_parser_execute(&parser, &settings_null, &foo, 1);
+    if (parsed != 1)
+      goto err;
+  }
+
+  parsed = http_parser_execute(&parser, &settings_null, buf1, buf1len);
+  if (parsed != buf1len) goto err;
   return;
 
-out:
-  parser_free();
+ err:
+  fprintf(stderr,
+          "\n*** error in test_no_overflow_long_body %s of length %zu ***\n",
+          req ? "REQUEST" : "RESPONSE",
+          length);
+  exit(1);
 }
 
 void
@@ -1207,82 +1408,95 @@ test_scan (const struct message *r1, const struct message *r2, const struct mess
 
   int total_len = strlen(total);
 
-  int total_ops = (total_len - 1) * (total_len - 2) / 2;
+  int total_ops = 2 * (total_len - 1) * (total_len - 2) / 2;
   int ops = 0 ;
 
   size_t buf1_len, buf2_len, buf3_len;
 
-  int i,j;
-  for (j = 2; j < total_len; j ++ ) {
-    for (i = 1; i < j; i ++ ) {
+  int i,j,type_both;
+  for (type_both = 0; type_both < 2; type_both ++ ) {
+    for (j = 2; j < total_len; j ++ ) {
+      for (i = 1; i < j; i ++ ) {
 
-      if (ops % 1000 == 0)  {
-        printf("\b\b\b\b%3.0f%%", 100 * (float)ops /(float)total_ops);
-        fflush(stdout);
+        if (ops % 1000 == 0)  {
+          printf("\b\b\b\b%3.0f%%", 100 * (float)ops /(float)total_ops);
+          fflush(stdout);
+        }
+        ops += 1;
+
+        parser_init(type_both ? HTTP_BOTH : r1->type);
+
+        buf1_len = i;
+        strncpy(buf1, total, buf1_len);
+        buf1[buf1_len] = 0;
+
+        buf2_len = j - i;
+        strncpy(buf2, total+i, buf2_len);
+        buf2[buf2_len] = 0;
+
+        buf3_len = total_len - j;
+        strncpy(buf3, total+j, buf3_len);
+        buf3[buf3_len] = 0;
+
+        read = parse(buf1, buf1_len);
+
+        if (r3->upgrade && parser->upgrade) goto test;
+
+        if (read != buf1_len) {
+          print_error(buf1, read);
+          goto error;
+        }
+
+        read = parse(buf2, buf2_len);
+
+        if (r3->upgrade && parser->upgrade) goto test;
+
+        if (read != buf2_len) {
+          print_error(buf2, read);
+          goto error;
+        }
+
+        read = parse(buf3, buf3_len);
+
+        if (r3->upgrade && parser->upgrade) goto test;
+
+        if (read != buf3_len) {
+          print_error(buf3, read);
+          goto error;
+        }
+
+        parse(NULL, 0);
+
+test:
+
+        if (3 != num_messages) {
+          fprintf(stderr, "\n\nParser didn't see 3 messages only %d\n", num_messages);
+          goto error;
+        }
+
+        if (!message_eq(0, r1)) {
+          fprintf(stderr, "\n\nError matching messages[0] in test_scan.\n");
+          goto error;
+        }
+
+        if (!message_eq(1, r2)) {
+          fprintf(stderr, "\n\nError matching messages[1] in test_scan.\n");
+          goto error;
+        }
+
+        if (!message_eq(2, r3)) {
+          fprintf(stderr, "\n\nError matching messages[2] in test_scan.\n");
+          goto error;
+        }
+
+        parser_free();
       }
-      ops += 1;
-
-      parser_init(r1->type);
-
-      buf1_len = i;
-      strncpy(buf1, total, buf1_len);
-      buf1[buf1_len] = 0;
-
-      buf2_len = j - i;
-      strncpy(buf2, total+i, buf2_len);
-      buf2[buf2_len] = 0;
-
-      buf3_len = total_len - j;
-      strncpy(buf3, total+j, buf3_len);
-      buf3[buf3_len] = 0;
-
-      read = parse(buf1, buf1_len);
-      if (read != buf1_len) {
-        print_error(buf1, read);
-        goto error;
-      }
-
-      read = parse(buf2, buf2_len);
-      if (read != buf2_len) {
-        print_error(buf2, read);
-        goto error;
-      }
-
-      read = parse(buf3, buf3_len);
-      if (read != buf3_len) {
-        print_error(buf3, read);
-        goto error;
-      }
-
-      parse(NULL, 0);
-
-      if (3 != num_messages) {
-        fprintf(stderr, "\n\nParser didn't see 3 messages only %d\n", num_messages);
-        goto error;
-      }
-
-      if (!message_eq(0, r1)) {
-        fprintf(stderr, "\n\nError matching messages[0] in test_scan.\n");
-        goto error;
-      }
-
-      if (!message_eq(1, r2)) {
-        fprintf(stderr, "\n\nError matching messages[1] in test_scan.\n");
-        goto error;
-      }
-
-      if (!message_eq(2, r3)) {
-        fprintf(stderr, "\n\nError matching messages[2] in test_scan.\n");
-        goto error;
-      }
-
-      parser_free();
     }
   }
   puts("\b\b\b\b100%");
   return;
 
-error:
+ error:
   fprintf(stderr, "i=%d  j=%d\n", i, j);
   fprintf(stderr, "buf1 (%u) %s\n\n", (unsigned int)buf1_len, buf1);
   fprintf(stderr, "buf2 (%u) %s\n\n", (unsigned int)buf2_len , buf2);
@@ -1296,23 +1510,17 @@ char *
 create_large_chunked_message (int body_size_in_kb, const char* headers)
 {
   int i;
-  size_t needed, wrote = 0;
+  size_t wrote = 0;
   size_t headers_len = strlen(headers);
-  size_t bufsize = headers_len + 10;
+  size_t bufsize = headers_len + (5+1024+2)*body_size_in_kb + 6;
   char * buf = malloc(bufsize);
 
-  strncpy(buf, headers, headers_len);
+  memcpy(buf, headers, headers_len);
   wrote += headers_len;
 
   for (i = 0; i < body_size_in_kb; i++) {
     // write 1kb chunk into the body.
-    needed = 5 + 1024 + 2; // "400\r\nCCCC...CCCC\r\n"
-    if (bufsize - wrote < needed) {
-      buf = realloc(buf, bufsize + needed);
-      bufsize += needed;
-    }
-
-    strcpy(buf + wrote, "400\r\n");
+    memcpy(buf + wrote, "400\r\n", 5);
     wrote += 5;
     memset(buf + wrote, 'C', 1024);
     wrote += 1024;
@@ -1320,15 +1528,9 @@ create_large_chunked_message (int body_size_in_kb, const char* headers)
     wrote += 2;
   }
 
-  needed = 5; // "0\r\n\r\n"
-  if (bufsize - wrote < needed) {
-    buf = realloc(buf, bufsize + needed);
-    bufsize += needed;
-  }
-  strcpy(buf + wrote, "0\r\n\r\n");
-  wrote += 5;
-
-  assert(buf[wrote] == 0);
+  memcpy(buf + wrote, "0\r\n\r\n", 6);
+  wrote += 6;
+  assert(wrote == bufsize);
 
   return buf;
 }
@@ -1346,6 +1548,16 @@ main (void)
 
   for (request_count = 0; requests[request_count].name; request_count++);
   for (response_count = 0; responses[response_count].name; response_count++);
+
+  //// OVERFLOW CONDITIONS
+
+  test_header_overflow_error(HTTP_REQUEST);
+  test_no_overflow_long_body(HTTP_REQUEST, 1000);
+  test_no_overflow_long_body(HTTP_REQUEST, 100000);
+
+  test_header_overflow_error(HTTP_RESPONSE);
+  test_no_overflow_long_body(HTTP_RESPONSE, 1000);
+  test_no_overflow_long_body(HTTP_RESPONSE, 100000);
 
   //// RESPONSES
 
@@ -1395,10 +1607,16 @@ main (void)
 
 
 
-  printf("response scan 1/1      ");
+  printf("response scan 1/2      ");
   test_scan( &responses[TRAILING_SPACE_ON_CHUNKED_BODY]
            , &responses[NO_HEADERS_NO_BODY_404]
            , &responses[NO_REASON_PHRASE]
+           );
+
+  printf("response scan 2/2      ");
+  test_scan( &responses[BONJOUR_MADAME_FR]
+           , &responses[UNDERSTORE_HEADER_KEY]
+           , &responses[NO_CARRIAGE_RET]
            );
 
   puts("responses okay");
@@ -1407,8 +1625,36 @@ main (void)
   /// REQUESTS
 
 
-  test_error("hello world");
-  test_error("GET / HTP/1.1\r\n\r\n");
+  test_simple("hello world", 0);
+  test_simple("GET / HTP/1.1\r\n\r\n", 0);
+
+  test_simple("ASDF / HTTP/1.1\r\n\r\n", 0);
+  test_simple("PROPPATCHA / HTTP/1.1\r\n\r\n", 0);
+  test_simple("GETA / HTTP/1.1\r\n\r\n", 0);
+
+  static const char *all_methods[] = {
+    "DELETE",
+    "GET",
+    "HEAD",
+    "POST",
+    "PUT",
+    //"CONNECT", //CONNECT can't be tested like other methods, it's a tunnel
+    "OPTIONS",
+    "TRACE",
+    "COPY",
+    "LOCK",
+    "MKCOL",
+    "MOVE",
+    "PROPFIND",
+    "PROPPATCH",
+    "UNLOCK",
+    0 };
+  const char **this_method;
+  for (this_method = all_methods; *this_method; this_method++) {
+    char buf[200];
+    sprintf(buf, "%s / HTTP/1.1\r\n\r\n", *this_method);
+    test_simple(buf, 1);
+  }
 
   const char *dumbfuck2 =
     "GET / HTTP/1.1\r\n"
@@ -1445,7 +1691,7 @@ main (void)
     "\tRA==\r\n"
     "\t-----END CERTIFICATE-----\r\n"
     "\r\n";
-  test_error(dumbfuck2);
+  test_simple(dumbfuck2, 0);
 
 #if 0
   // NOTE(Wed Nov 18 11:57:27 CET 2009) this seems okay. we just read body
@@ -1457,7 +1703,7 @@ main (void)
                                            "Accept: */*\r\n"
                                            "\r\n"
                                            "HELLO";
-  test_error(bad_get_no_headers_no_body);
+  test_simple(bad_get_no_headers_no_body, 0);
 #endif
   /* TODO sending junk and large headers gets rejected */
 
@@ -1479,22 +1725,28 @@ main (void)
     }
   }
 
-  printf("request scan 1/3      ");
+  printf("request scan 1/4      ");
   test_scan( &requests[GET_NO_HEADERS_NO_BODY]
            , &requests[GET_ONE_HEADER_NO_BODY]
            , &requests[GET_NO_HEADERS_NO_BODY]
            );
 
-  printf("request scan 2/3      ");
+  printf("request scan 2/4      ");
   test_scan( &requests[POST_CHUNKED_ALL_YOUR_BASE]
            , &requests[POST_IDENTITY_BODY_WORLD]
            , &requests[GET_FUNKY_CONTENT_LENGTH]
            );
 
-  printf("request scan 3/3      ");
+  printf("request scan 3/4      ");
   test_scan( &requests[TWO_CHUNKS_MULT_ZERO_END]
            , &requests[CHUNKED_W_TRAILING_HEADERS]
            , &requests[CHUNKED_W_BULLSHIT_AFTER_LENGTH]
+           );
+
+  printf("request scan 4/4      ");
+  test_scan( &requests[QUERY_URL_WITH_QUESTION_MARK_GET]
+           , &requests[PREFIX_NEWLINE_GET ]
+           , &requests[CONNECT_REQUEST]
            );
 
   puts("requests okay");

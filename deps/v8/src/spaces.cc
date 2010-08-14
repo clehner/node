@@ -342,7 +342,9 @@ void MemoryAllocator::TearDown() {
 void* MemoryAllocator::AllocateRawMemory(const size_t requested,
                                          size_t* allocated,
                                          Executability executable) {
-  if (size_ + static_cast<int>(requested) > capacity_) return NULL;
+  if (size_ + static_cast<size_t>(requested) > static_cast<size_t>(capacity_)) {
+    return NULL;
+  }
   void* mem;
   if (executable == EXECUTABLE  && CodeRange::exists()) {
     mem = CodeRange::AllocateRawMemory(requested, allocated);
@@ -1457,6 +1459,7 @@ static void ReportCodeKindStatistics() {
       CASE(STORE_IC);
       CASE(KEYED_STORE_IC);
       CASE(CALL_IC);
+      CASE(KEYED_CALL_IC);
       CASE(BINARY_OP_IC);
     }
   }
@@ -2304,8 +2307,8 @@ void PagedSpace::CollectCodeStatistics() {
       }
 
       ASSERT(code->instruction_start() <= prev_pc &&
-             prev_pc <= code->relocation_start());
-      delta += static_cast<int>(code->relocation_start() - prev_pc);
+             prev_pc <= code->instruction_end());
+      delta += static_cast<int>(code->instruction_end() - prev_pc);
       EnterComment("NoComment", delta);
     }
   }
